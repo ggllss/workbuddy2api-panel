@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/server"
 )
 
 // Config 顶层配置。
@@ -206,6 +207,20 @@ type Config struct {
 		// 默认 0 = 关闭；负值钳 0。
 		CreditFloor int64 `json:"credit_floor"`
 	} `json:"pool"`
+
+	// Auto 全量 auto（auto:all）模式：由候选模型有序列表驱动，按优先级跨模型降级。
+	// 与 cn:auto / global:auto-chat 无关——那两个只是普通上游模型 id（resolveModel
+	// 剥前缀后原样透传），本段配置不影响它们（零回归）。
+	Auto struct {
+		// Candidates 候选模型有序列表（顺序即优先级），元素为完整 "realm:model"
+		// 形态，如 "global:deepseek-v4.1-flash"。请求 model=auto:all 时网关按序
+		// 尝试：当前候选「全池无号可选 / 该模型在所有账号上冷却」才降级到下一个；
+		// 单号 429/超时/5xx 不降级（那是账号轮转的职责）。每个候选享有独立的
+		// MaxRotate 账号轮转预算。
+		// 空 = 功能关闭（auto:all 请求返回 400）。可把 "cn:auto" 作为普通一项
+		// 加到末尾保底（上游自身的 auto 档）。
+		Candidates []string `json:"candidates"`
+	} `json:"auto"`
 
 	SessionSticky struct {
 		Enabled    bool   `json:"enabled"`     // 默认 true
@@ -527,6 +542,11 @@ func (c *Config) normalize() error {
 	if c.Pool.CreditFloor < 0 {
 		c.Pool.CreditFloor = 0
 	}
+	// 全量 auto 候选模型：去空/去重 + realm 前缀校验（非法项 fail fast，见
+	// normalizeAutoCandidates）。空列表 = 功能关闭（auto:all 返回 400）。
+	if c.Auto.Candidates, err = normalizeAutoCandidates(c.Auto.Candidates); err != nil {
+		return err
+	}
 	if c.Pool.BreakerThreshold <= 0 {
 		c.Pool.BreakerThreshold = 3
 	}
@@ -595,6 +615,49 @@ func (c *Config) normalize() error {
 		return err
 	}
 	return c.normalizePrompt()
+}
+
+// normalizeAutoCandidates 归一化全量 auto（auto:all）候选模型列表：
+//
+//   - 去空：空串/纯空白项直接丢弃（面板候选区用逗号分隔回填，易产生尾随空项）；
+//   - 去重：按归一化后的完整名去重，**保留首次出现顺序**（顺序即优先级）；
+//   - 前缀校验：每项必须恰为 "cn:<模型>" 或 "global:<模型>"。裸名（无前缀）报错
+//     而不是猜域——猜错会把请求打到另一个域端点（cn/global 是两套目录与端点）；
+//     realm 段大小写敏感（与 server.ResolveModel 同口径）。
+//   - 禁自指：裸名 == "auto:all" 的项报错，避免候选列表自我引用。
+//
+// 非法项 fail fast（与 prompt.file 不可读、时长拼写错误同一风格）：静默丢弃会让
+// 「面板里勾了却没生效」无从排查。归一化后的空列表 = 功能关闭。
+func normalizeAutoCandidates(in []string) ([]string, error) {
+	out := make([]string, 0, len(in))
+	seen := make(map[string]bool, len(in))
+	for _, raw := range in {
+		item := strings.TrimSpace(raw)
+		if item == "" {
+			continue
+		}
+		idx := strings.IndexByte(item, ':')
+		if idx < 0 {
+			return nil, fmt.Errorf("auto.candidates: %q 缺少 realm 前缀（应为 \"cn:<模型>\" 或 \"global:<模型>\"）", item)
+		}
+		realm, bare := item[:idx], strings.TrimSpace(item[idx+1:])
+		if realm != "cn" && realm != "global" {
+			return nil, fmt.Errorf("auto.candidates: %q 的 realm 前缀非法（只支持 cn / global）", item)
+		}
+		if bare == "" {
+			return nil, fmt.Errorf("auto.candidates: %q 缺少模型名", item)
+		}
+		if bare == server.AutoAllModel {
+			return nil, fmt.Errorf("auto.candidates: %q 不能把 %s 自身作为候选（自指）", item, server.AutoAllModel)
+		}
+		canonical := realm + ":" + bare
+		if seen[canonical] {
+			continue
+		}
+		seen[canonical] = true
+		out = append(out, canonical)
+	}
+	return out, nil
 }
 
 // normalizePrompt 校验 prompt.mode 并按 file 加载提示词文本（custom/append 模式）。
