@@ -428,6 +428,24 @@ func (h *Handler) modelList() []map[string]any {
 			out = append(out, entry)
 		}
 	}
+	// 全量 auto（auto:all）：网关侧伪模型，**仅当候选列表非空时列出**——未配置
+	// 候选时它必然回 400，广告一个必然失败的 id 只会让客户端白试一次。
+	//
+	// 本条目不进 upstream 目录缓存（不是上游模型）：每次请求按 pool 的实时候选
+	// 快照构造，所以面板改完候选立刻可见；只有上游目录部分受 dynamicModelsTTL
+	// （10min）滞后影响。也不列进面板 /panel/api/models（那是候选选择器的数据源，
+	// 把 auto:all 放进去会诱导用户把它选成候选，而配置侧会按缺前缀/自指拒绝）。
+	if cands := h.cfg.Pool.AutoCandidates(); len(cands) > 0 {
+		out = append(out, map[string]any{
+			"id":       AutoAllModel,
+			"object":   "model",
+			"created":  1753600000,
+			"owned_by": "workbuddy",
+			"name":     AutoAllModel,
+			// description 与上游目录条目同字段名（面板/客户端按同一字段展示）。
+			"description": fmt.Sprintf("全量 auto：按控制台「全量 auto 候选模型」(auto.candidates) 的顺序逐个尝试 %d 个候选模型，当前候选全池不可用时降级到下一个", len(cands)),
+		})
+	}
 	return out
 }
 
@@ -1194,10 +1212,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				if candIdx < len(candidateModels)-1 {
 					continue // 换下一个候选
 				}
-				// 全部候选都不可用：沿用既有 400 model_unavailable 语义（"你选的模型
-				// 当前不可用"而非"服务端过载"），文案点明候选列表已跑完并给出保底建议。
-				autoHint := fmt.Sprintf("auto:all: %d candidate model(s) tried in order, none selectable", len(candidateModels))
+				// 候选跑完了，两种「耗尽」语义必须分开（用户拍板）：
+				//
+				//   - 模型级全池锁定（candBlock.Blocked）：语义是「你配置的这些模型
+				//     此刻都不可用」，换号必然同样失败 → 400 model_unavailable
+				//     （不可重试），文案点明候选列表已跑完并给出 cn:auto 保底建议。
+				//   - 纯账号级耗尽（池里没号 / 号都在冷却，模型级台账清白）：语义是
+				//     「服务端暂时没有容量」，属于可重试情形 → **不写响应**，落回下方
+				//     既有末端错误路径，由它按 modelBlock 判据给出 503 no_healthy_account
+				//     （或 429，若最后一跳是软限流）。此前这里一律 400，把「稍后再试
+				//     就好」误报成「不可重试」。
 				if candBlock.Blocked {
+					autoHint := fmt.Sprintf("auto:all: %d candidate model(s) tried in order, the last one is blocked on every account", len(candidateModels))
 					autoHint += fmt.Sprintf("; last candidate %s: %d account(s) cooling down this model", candModel, candBlock.Count)
 					if !candBlock.Until.IsZero() {
 						autoHint += "; earliest unblock at " + candBlock.Until.Format(time.RFC3339)
@@ -1205,12 +1231,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					if s := strings.TrimSpace(candBlock.Reason); s != "" {
 						autoHint += "; upstream: " + s
 					}
+					autoHint += "; tip: add \"cn:auto\" as the last candidate to keep a fallback"
+					writeOpenAIErrorHint(w, http.StatusBadRequest, "model_unavailable", autoAllUnavailableMessage, autoHint)
+					st.status = http.StatusBadRequest
+					st.outcome = reqlog.OutcomeHTTPError
+					return
 				}
-				autoHint += "; tip: add \"cn:auto\" as the last candidate to keep a fallback"
-				writeOpenAIErrorHint(w, http.StatusBadRequest, "model_unavailable", autoAllUnavailableMessage, autoHint)
-				st.status = http.StatusBadRequest
-				st.outcome = reqlog.OutcomeHTTPError
-				return
+				// 纯账号级耗尽：什么都不做，继续走末端错误块（该块末尾有显式 return，
+				// 不会落到循环外再进下一个候选）。
 			}
 		}
 
@@ -1307,6 +1335,8 @@ const AutoAllModel = "auto:all"
 const autoAllNoCandidateMessage = "尚未配置候选模型：请在控制台「全量 auto 候选模型」里勾选候选模型并按优先级排序"
 
 // autoAllUnavailableMessage 全部候选模型都不可用时的客户端文案（含保底建议）。
+// **只用于模型级全池锁定**（candBlock.Blocked）这一条路径：纯账号级耗尽（池里没号 /
+// 号都在冷却）是可重试的服务端暂时没容量，落回末端错误路径给 503，不用这条文案。
 const autoAllUnavailableMessage = "所有候选模型均不可用（已按候选顺序逐个尝试；可把 cn:auto 作为普通一项加到候选列表末尾保底）"
 
 // tokensPerSecond 计算吐字速率（token/s），返回 (速率, 是否有意义)。
