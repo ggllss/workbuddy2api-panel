@@ -442,6 +442,14 @@ func (h *Handler) modelList() []map[string]any {
 			"created":  1753600000,
 			"owned_by": "workbuddy",
 			"name":     AutoAllModel,
+			// 能力声明：取候选里最好的一种（上游实测 deepseek-v4.1-flash =
+			// maxInputTokens 1000000 / maxOutputTokens 393216，见 client_test.go 的实测
+			// 样本）。客户端会按 context_length 提前截断上下文、按 max_output_tokens
+			// 限制输出，声明过小会白白丢能力；auto:all 的实际上限取决于最终命中的候选，
+			// 故按最好的候选声明，字段名与上游条目一致（supports_images 同）。
+			"context_length":    upstream.DefaultContextWindow,
+			"max_output_tokens": autoAllMaxOutputTokens,
+			"supports_images":   true,
 			// description 与上游目录条目同字段名（面板/客户端按同一字段展示）。
 			"description": fmt.Sprintf("全量 auto：按控制台「全量 auto 候选模型」(auto.candidates) 的顺序逐个尝试 %d 个候选模型，当前候选全池不可用时降级到下一个", len(cands)),
 		})
@@ -1330,6 +1338,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 // pool 里的候选模型有序列表逐个尝试，只在该候选「全池无号可选」时降级到下一个。
 // 与 cn:auto / global:auto-chat 无关——那两个只是普通上游模型 id，行为不变。
 const AutoAllModel = "auto:all"
+
+// autoAllMaxOutputTokens auto:all 对外声明的最大输出 token 数：取候选里最好的一种
+// （上游实测 deepseek-v4.1-flash 的 maxOutputTokens=393216，与 client_test.go 的样本一致）。
+const autoAllMaxOutputTokens int64 = 393216
 
 // autoAllNoCandidateMessage 未配置候选模型时的客户端文案（面板提示）。
 const autoAllNoCandidateMessage = "尚未配置候选模型：请在控制台「全量 auto 候选模型」里勾选候选模型并按优先级排序"

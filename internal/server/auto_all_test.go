@@ -463,6 +463,19 @@ func TestModelsListsAutoAllOnlyWhenConfigured(t *testing.T) {
 	if entry["object"] != "model" || entry["owned_by"] != "workbuddy" {
 		t.Errorf("auto:all 条目风格应与既有条目一致：%v", entry)
 	}
+	// 能力声明：客户端按这三个字段决定上下文上限、输出上限与能否传图（Codex/ZCode 会按
+	// context_length 提前截断上下文），声明错直接影响可用性。取值取候选里最好的一种：
+	// 上游实测 deepseek-v4.1-flash = maxInputTokens 1000000 / maxOutputTokens 393216
+	// （见 internal/upstream/client_test.go 的实测样本）。
+	if got, _ := entry["context_length"].(float64); got != 1000000 {
+		t.Errorf("context_length=%v want 1000000（1M）", entry["context_length"])
+	}
+	if got, _ := entry["max_output_tokens"].(float64); got != 393216 {
+		t.Errorf("max_output_tokens=%v want 393216（393K）", entry["max_output_tokens"])
+	}
+	if got, _ := entry["supports_images"].(bool); !got {
+		t.Errorf("supports_images=%v want true（支持图片理解）", entry["supports_images"])
+	}
 	desc, _ := entry["description"].(string)
 	if strings.TrimSpace(desc) == "" {
 		t.Errorf("auto:all 条目必须带非空说明字段：%v", entry)
