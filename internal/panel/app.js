@@ -434,7 +434,14 @@ function renderAccounts(list) {
         : (dg > (s.cool_remaining_sec || 0) ? '连败降权' : (s.cool_kind === 'hard_credit' ? '积分冷却' : '限流冷却'));
       tag = '<span class="tag warn">' + kind + ' · ' + dur(cool) + '</span>';
     } else tag = '<span class="tag ok">可用</span>' + (s.in_flight ? '' : '');
-    const note = s.reason ? '<div class="hint" style="font-size:11.5px;color:var(--ink-3);margin-top:3px">' + esc(s.reason) + '</div>' : '';
+    // reason 是「最近一次冷却 / 禁用的原因」：后端 Status.Reason 原样透出、到期不清空
+    // （state.json 要留作诊断），而冷却是否生效由实时算出的 cool 决定（上面 tag 用它）。
+    // 此前无条件显示，导致每个历史上被限流过的账号永久挂着「429 rate limit」，与同一行
+    // 刚算出的「可用」标签自相矛盾（用户实测：账号池所有行都显示 429 rate limit）。
+    // 只在原因真正生效时展示：冷却/熔断/降权中，或账号被禁用。
+    const note = (s.reason && (cool > 0 || s.disabled))
+      ? '<div class="hint" style="font-size:11.5px;color:var(--ink-3);margin-top:3px">' + esc(s.reason) + '</div>'
+      : '';
     const rateLimits = rateLimitRowsHtml(s.rate_limited_models, Date.now());
     const short = s.uid.length > 16 ? s.uid.slice(0, 16) + '…' : s.uid;
     // 企业版不限量：上游 limitNum == -1，网关以 credits_total=-1 透出（见 upstream

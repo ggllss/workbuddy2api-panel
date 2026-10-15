@@ -1406,3 +1406,21 @@ func TestAppJSLogAcctNameWiring(t *testing.T) {
 		}
 	}
 }
+
+// 账号表的「冷却原因」必须按是否生效门控：后端 Status.Reason 是最近一次的原因，冷却到期后
+// 仍保留（state.json 留作诊断），而冷却是否生效由前端实时算出的 cool 决定。无条件渲染会让
+// 每个历史上被限流过的账号永久挂着「429 rate limit」，与同一行的「可用」标签自相矛盾
+// （用户实测：账号池所有行都显示 429 rate limit）。
+func TestAppJSAccountNoteGatedByEffect(t *testing.T) {
+	raw, err := os.ReadFile("app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(raw)
+	if !strings.Contains(js, "s.reason && (cool > 0 || s.disabled)") {
+		t.Error("账号表冷却原因未按「是否生效」门控：过期冷却的原因会永久显示，与「可用」标签矛盾")
+	}
+	if strings.Contains(js, "const note = s.reason ?") {
+		t.Error("账号表仍在无条件渲染 s.reason（过期冷却会被误报成当前限流）")
+	}
+}
