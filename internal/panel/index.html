@@ -1027,6 +1027,24 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         </div>
 
         <div class="box">
+          <header><h3>全量 auto 候选模型 <span class="hint">model=auto:all 时按此顺序跨模型降级</span></h3></header>
+          <div class="pad">
+            <div class="hint">请求 <code>auto:all</code> 时网关按下面的顺序逐个尝试候选模型：每个候选先跑完既有的账号轮转，
+              只有当前候选「一个可用账号都选不出来 / 该模型在所有账号上都被锁」才降级到下一个；
+              单号 429 / 超时 / 5xx 不触发换模型（那是账号轮转的职责）。候选为空时 <code>auto:all</code> 直接返回 400。
+              可把 <code>cn:auto</code> 作为普通一项加到最后保底。改动即时生效，无需重启。</div>
+            <div class="inline" style="margin-top:10px">
+              <button type="button" class="xs" id="btnAutoCandLoad">加载模型清单</button>
+              <input id="autoCandManual" placeholder="手动添加，如 cn:auto">
+              <button type="button" class="xs" id="btnAutoCandAdd">添加</button>
+            </div>
+            <div id="autoCandPick" class="hint" style="margin-top:8px"></div>
+            <div id="autoCandList" style="margin-top:8px"></div>
+            <input type="hidden" name="auto_candidates" id="autoCandidates">
+          </div>
+        </div>
+
+        <div class="box">
           <header><h3>上游与高级</h3></header>
           <div class="pad">
             <div class="grid3">

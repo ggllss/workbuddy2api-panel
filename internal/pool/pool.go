@@ -75,6 +75,11 @@ type Pool struct {
 	// 为 LRU 兜底/防惊群提供与 time.Now() 精度无关的严格全序（Windows ~0.5ms 精度下
 	// lastUsed 墙钟会全等）。仅 pick 写锁路径读写，无需 atomic。
 	pickSeq uint64
+	// autoCandidates 全量 auto（auto:all）候选模型有序列表，元素为完整
+	// "realm:model" 形态。运行态配置：main 经 SetAutoCandidates 注入（config
+	// auto.candidates），面板保存即热生效（无需重启）。空 = 该模式关闭
+	// （handler 对 auto:all 直接 400，不静默透传上游）。顺序即优先级。
+	autoCandidates []string
 	// stopCh 关闭信号：Close 关闭它使 startFlusher 的后台 goroutine 退出。
 	// nil = 未启动 flusher（stateFp 为空时 New 不起 flusher）。
 	stopCh chan struct{}
@@ -236,6 +241,30 @@ func (p *Pool) SetModelRateOf(fn func(realm, model string) string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.modelRateOf = fn
+}
+
+// SetAutoCandidates 注入全量 auto（auto:all）候选模型有序列表（main 从 config
+// auto.candidates 解析后调用；面板保存走同一函数，故热生效无需重启）。
+//
+// 列表已在 config.normalize 侧完成去空/去重/realm 前缀校验，此处只做拷贝隔离
+// ——调用方后续改动传入切片不会影响池内状态（面板每次保存都会传新切片）。
+// 传 nil/空切片 = 关闭该模式（handler 对 auto:all 直接 400）。
+func (p *Pool) SetAutoCandidates(models []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.autoCandidates = append([]string(nil), models...)
+}
+
+// AutoCandidates 返回候选模型列表的拷贝（handler 选路用，按顺序即优先级）。
+// 返回拷贝：调用方（handler）持锁外遍历，不能与并发的 SetAutoCandidates 共享底层数组。
+// 空 = 未配置。
+func (p *Pool) AutoCandidates() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if len(p.autoCandidates) == 0 {
+		return nil
+	}
+	return append([]string(nil), p.autoCandidates...)
 }
 
 // SetMaxInFlight 注入单账号最大在途请求数；0 = 不限。负值保留原值。

@@ -773,6 +773,60 @@ process.stdout.write(JSON.stringify([
 	}
 }
 
+// TestAppJSCollectConfigAutoCandidates 钉住全量 auto 候选列表（auto.candidates）
+// 的提交形态：必须是**数组**（字符串会被后端 normalize 的 realm 前缀校验拒掉），
+// 且清空时必须下发空数组——否则「取消全部候选后保存」会被后端当成未提交，
+// 旧列表原样留着，面板显示已保存但 auto:all 仍在按旧候选降级。
+func TestAppJSCollectConfigAutoCandidates(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; collectConfig test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('const CFG_MAP');
+const end = src.indexOf('/* Go 时长字段即时校验');
+if (start < 0 || end < 0 || end < start) throw new Error('collectConfig region not found');
+const mk = v => ({ type: 'text', value: v });
+function run(value) {
+  const cfgForm = { elements: { auto_candidates: mk(value) } };
+  const ctx = {
+    Date, Number, String, Math, Map, Array, Object, isNaN, URLSearchParams, Set,
+    document: { getElementById: id => (id === 'cfgForm' ? cfgForm : null) },
+    $: id => (id === 'cfgForm' ? cfgForm : null),
+  };
+  vm.createContext(ctx);
+  vm.runInContext(src.slice(start, end) + '\nthis.collectConfig = collectConfig;', ctx);
+  return ctx.collectConfig();
+}
+const a = run('global:deepseek-v4.1-flash, cn:auto');
+const b = run('');
+const c = run('   ');
+process.stdout.write(JSON.stringify([
+  Array.isArray(a.auto && a.auto.candidates), a.auto && a.auto.candidates,
+  b.auto && b.auto.candidates.length,
+  c.auto && c.auto.candidates.length,
+]));`
+	f, err := os.CreateTemp(t.TempDir(), "cfgc-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("auto candidates collectConfig node test failed: %v\n%s", err, out)
+	}
+	// [是数组, 有序候选（逗号+空格分隔 → 两项）, 空串 → 长度 0, 纯空白 → 长度 0]
+	const want = `[true,["global:deepseek-v4.1-flash","cn:auto"],0,0]`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("auto.candidates=%s want %s", strings.TrimSpace(string(out)), want)
+	}
+}
+
 // TestAppJSExpirySortedByExpiry 到期提醒按「最近到期」升序，且不分域（issue #125）。
 //
 // 后端 /panel/api/packages 是按**余额降序**返回的，恰好把 CN 账号都排在前面、

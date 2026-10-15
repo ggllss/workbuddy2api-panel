@@ -80,6 +80,9 @@
     "cost_explore_interval": "30m",
     "credit_floor": 100
   },
+  "auto": {
+    "candidates": []
+  },
   "session_sticky": {
     "enabled": true,
     "ttl": "30m",

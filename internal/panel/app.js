@@ -14,6 +14,10 @@ let reqEntries = [];
 let usDim = 'account', usCreditDim = 'account', usSort = 'total';
 let usageData = null;
 let reqRangeState = null; // 请求记录的时间范围（用量页的见 trangeState）
+/* 全量 auto（auto:all）候选模型：ordered 状态与上次拉取的模型清单。
+   声明在文件顶部（同 mdAll 等）：顶层 go('#config') 早于文件后半段求值时不能踩 TDZ。 */
+let autoCandState = [];    // 有序候选（完整 realm:model 形态，顺序 = 优先级）
+let autoCandModels = [];   // 上次拉取的模型清单 id（带 cn:/global: 前缀）
 
 const $ = id => document.getElementById(id);
 
@@ -991,6 +995,7 @@ const CFG_MAP = {
   sanitize_blacklist_fingerprints: ['features', 'sanitize_blacklist_fingerprints'],
   session_sticky_enabled: ['session_sticky', 'enabled'],
   request_client_info: ['logging', 'request_client_info'],
+  auto_candidates: ['auto', 'candidates'],
 };
 /* 「覆盖型」文本字段：空串本身是有意义的取值（= 回落到内置默认），必须照发。
  *
@@ -1027,6 +1032,11 @@ async function loadConfig() {
       else el.value = v == null ? '' : v;
     }
     markDurationFields(); // 回填后重置校验态（清掉残留红框；现值来自后端必然合法）
+    // 全量 auto 候选列表：hidden input 的值（逗号分隔）是唯一真相源，这里解析成
+    // 有序状态再渲染「候选区」（顺序 = 优先级）。
+    autoCandState = ($('cfgForm').elements['auto_candidates'].value || '').split(/[,，\s]+/).filter(Boolean);
+    autoCandSync();
+    renderAutoCandPick();
     $('cfgNote').textContent = '';
   } catch (e) { toast('读取配置失败：' + e.message, 'err'); }
 }
@@ -1041,7 +1051,12 @@ function collectConfig() {
     else {
       const raw = el.value.trim();
       // 覆盖型字段空串照发（见 CLEARABLE_CFG）；其余空 = 不下发。
-      if (raw === '') v = CLEARABLE_CFG.has(name) ? '' : undefined;
+      if (name === 'auto_candidates') {
+        // 数组字段：空数组是合法取值（= 清空候选、关闭 auto:all），必须照发，
+        // 否则「取消全部候选后保存」会被后端当作未提交而保留旧列表。
+        v = raw === '' ? [] : raw.split(/[,，\s]+/).filter(Boolean);
+      }
+      else if (raw === '') v = CLEARABLE_CFG.has(name) ? '' : undefined;
       else if (name.endsWith('_hours')) v = raw.split(/[,，\s]+/).filter(Boolean).map(Number);
       else v = raw;
     }
@@ -1107,6 +1122,108 @@ $('cfgForm').onsubmit = async ev => {
   } catch (e) { toast('保存失败：' + e.message, 'err'); }
   finally { btn.disabled = false; btn.textContent = '保存配置'; }
 };
+
+/* ── 全量 auto 候选模型（auto:all）──────────────────────────────────
+   有序列表 = 优先级：候选区提供上移/下移/移除，模型清单只负责增删。
+   表单侧只有 hidden input（name=auto_candidates，逗号分隔）；排序状态在
+   autoCandState 里，任何变更都回写 hidden input，collectConfig 特判成数组。
+   模型清单来自 /panel/api/models（直连上游，较贵）→ 只在点按钮时拉。 */
+
+function autoCandSync() {
+  const hidden = $('cfgForm').elements['auto_candidates'];
+  if (hidden) hidden.value = autoCandState.join(', ');
+  const box = $('autoCandList');
+  if (!box) return;
+  if (!autoCandState.length) {
+    box.innerHTML = '<div style="color:var(--ink-3);font-size:12.5px">尚未选择候选模型：auto:all 请求将返回 400。</div>';
+    return;
+  }
+  box.innerHTML = autoCandState.map((m, i) =>
+    '<div style="display:flex;align-items:center;gap:6px;padding:3px 0">' +
+    '<span style="color:var(--ink-3);min-width:16px">' + (i + 1) + '</span>' +
+    '<code style="flex:1;overflow-wrap:anywhere">' + esc(m) + '</code>' +
+    '<button type="button" class="xs" data-act="up" data-i="' + i + '"' + (i === 0 ? ' disabled' : '') + '>↑</button>' +
+    '<button type="button" class="xs" data-act="down" data-i="' + i + '"' + (i === autoCandState.length - 1 ? ' disabled' : '') + '>↓</button>' +
+    '<button type="button" class="xs" data-act="del" data-i="' + i + '">移除</button>' +
+    '</div>').join('');
+}
+
+function renderAutoCandPick() {
+  const box = $('autoCandPick');
+  if (!box) return;
+  if (!autoCandModels.length) {
+    box.innerHTML = '尚未加载模型清单：点「加载模型清单」从上游拉取（也可手动添加，如 cn:auto）。';
+    return;
+  }
+  box.innerHTML = '<div style="margin-bottom:4px">勾选即加入候选（顺序用上移/下移调整）：</div>' +
+    '<div style="max-height:190px;overflow:auto">' +
+    autoCandModels.map(id =>
+      '<label style="display:inline-flex;align-items:center;gap:4px;margin:2px 12px 2px 0;white-space:nowrap">' +
+      '<input type="checkbox" data-model="' + esc(id) + '"' + (autoCandState.includes(id) ? ' checked' : '') + '>' +
+      '<span>' + esc(id) + '</span></label>').join('') +
+    '</div>';
+}
+
+async function loadAutoCandModels() {
+  const box = $('autoCandPick');
+  box.textContent = '正在向上游查询模型清单…';
+  try {
+    const d = await api('models');
+    autoCandModels = (d.models || []).map(m => m.id).filter(Boolean);
+    renderAutoCandPick();
+  } catch (e) {
+    autoCandModels = [];
+    box.textContent = '加载模型清单失败：' + e.message;
+  }
+}
+
+// 候选区排序/移除（事件委托：行内按钮只有 data-act/data-i）。
+$('autoCandList').addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-act]');
+  if (!b) return;
+  const i = Number(b.dataset.i);
+  if (b.dataset.act === 'up' && i > 0) {
+    [autoCandState[i - 1], autoCandState[i]] = [autoCandState[i], autoCandState[i - 1]];
+  } else if (b.dataset.act === 'down' && i < autoCandState.length - 1) {
+    [autoCandState[i + 1], autoCandState[i]] = [autoCandState[i], autoCandState[i + 1]];
+  } else if (b.dataset.act === 'del') {
+    autoCandState.splice(i, 1);
+  } else return;
+  autoCandSync();
+  renderAutoCandPick();
+});
+// 勾选清单增删（新勾选的追加到末尾，取消勾选从任意位置移除）。
+$('autoCandPick').addEventListener('change', ev => {
+  const cb = ev.target.closest('input[data-model]');
+  if (!cb) return;
+  const id = cb.dataset.model;
+  if (cb.checked) {
+    if (!autoCandState.includes(id)) autoCandState.push(id);
+  } else {
+    autoCandState = autoCandState.filter(m => m !== id);
+  }
+  autoCandSync();
+});
+$('btnAutoCandLoad').onclick = loadAutoCandModels;
+// 手动添加：清单里没有的模型（如 cn:auto 保底项）也能加进候选。
+$('btnAutoCandAdd').onclick = () => {
+  const el = $('autoCandManual');
+  const id = el.value.trim();
+  if (!id) return;
+  if (!/^(cn|global):.+/.test(id)) {
+    toast('候选模型要写完整形态：cn:<模型> 或 global:<模型>', 'err');
+    return;
+  }
+  if (autoCandState.includes(id)) { el.value = ''; return; }
+  autoCandState.push(id);
+  el.value = '';
+  autoCandSync();
+  renderAutoCandPick();
+};
+// 手动输入框回车 = 添加（而不是提交整个配置表单）。
+$('autoCandManual').addEventListener('keydown', ev => {
+  if (ev.key === 'Enter') { ev.preventDefault(); $('btnAutoCandAdd').onclick(); }
+});
 
 /* ── 添加账号 ─────────────────────────────────────────────────────── */
 function openAdd() {
