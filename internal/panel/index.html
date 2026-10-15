@@ -575,6 +575,11 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .clip { display: block; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .clip.ip { max-width: 150px; font-family: var(--mono); font-size: 12.5px; }
   .clip.rid { max-width: 150px; font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); }
+  /* 账号列：别名通常远短于归档标签「昵称(uid8)」，列宽会随内容缩，把邻近列挤到换行。
+     给一个宽度区间（短名不塌、长名不撑），配合 .clip 的单行省略与悬停全名。 */
+  .clip.acct { max-width: 180px; min-width: 84px; }
+  /* 模型列同理：global:deepseek-v4.1-flash-sg 这类长 id 不能在单元格里折行。 */
+  .clip.mdl { max-width: 220px; }
   .acc.req .muted { color: var(--ink-3); }
   .src-off { color: var(--warn); }
 

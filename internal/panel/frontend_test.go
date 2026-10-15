@@ -1382,11 +1382,27 @@ func TestAppJSLogAcctNameWiring(t *testing.T) {
 		{"aliasByUID8[String(s.uid).slice(0, 8)] = s.alias;", "loadOverview 未建 uid8 → 别名索引"},
 		{"function logAcctName(label) {", "缺少 logAcctName"},
 		{"logAcctName(e && e.account), e && e.account", "搜索文本未把别名与原标签都纳入匹配"},
-		{"esc(logAcctName(e && e.account) || '—')", "请求记录表账号单元格未走 logAcctName"},
+		{"const acct = logAcctName(e && e.account) || '';", "请求记录表账号单元格未走 logAcctName"},
 		{"logAcctName(e && e.account) || '—',", "请求记录行文本（tooltip/复制）未走 logAcctName"},
+		// 账号列/模型列必须做单行省略：别名通常远短于归档标签「昵称(uid8)」，列宽会随内容
+		// 收缩，而 .acc td 没有 nowrap——不套 .clip 就会在单元格内折行、行高参差。
+		{`<span class="clip acct" title="' + esc(acct) + '">`, "请求记录表账号单元格未做单行省略"},
+		{`<span class="clip mdl" title="' + esc(mdl) + '">`, "请求记录表模型列未做单行省略"},
 	} {
 		if !strings.Contains(js, want.frag) {
 			t.Errorf("app.js 缺少 %q（%s）", want.frag, want.why)
+		}
+	}
+	html, err := os.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []struct{ frag, why string }{
+		{".clip.acct {", "index.html 缺少账号列单行省略样式（宽度区间 + 省略号）"},
+		{".clip.mdl {", "index.html 缺少模型列单行省略样式"},
+	} {
+		if !strings.Contains(string(html), want.frag) {
+			t.Errorf("index.html 缺少 %q（%s）", want.frag, want.why)
 		}
 	}
 }

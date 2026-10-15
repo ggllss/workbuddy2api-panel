@@ -1023,11 +1023,17 @@ function renderRequestTable() {
     const ip = e && e.client_ip ? e.client_ip : '';
     const ua = e && e.user_agent ? e.user_agent : '';
     const rid = e && e.request_id ? e.request_id : '';
+    // 模型列与账号列：内容长度随模型名 / 别名浮动（别名往往远短于归档标签「昵称(uid8)」，
+    // 列宽会跟着缩，反过来把邻近列挤到换行）。这两格此前既无 nowrap 也无 .clip，是这张表里
+    // 仅剩的两个没做单行省略的长文本格——统一套 .clip（单行 + 省略号 + 悬停看全名），
+    // 行高才不会参差。空值沿用同行其它列一致的 muted 破折号。
+    const mdl = (e && e.model) || '';
+    const acct = logAcctName(e && e.account) || '';
     return '<tr title="' + esc(requestLogText(e)) + '">' +
       '<td class="num">' + esc(when) + '</td>' +
       '<td>' + reqOutcomeTag(e) + '</td>' +
-      '<td>' + esc(e && e.model || '—') + '</td>' +
-      '<td>' + esc(logAcctName(e && e.account) || '—') + '</td>' +
+      '<td>' + (mdl ? '<span class="clip mdl" title="' + esc(mdl) + '">' + esc(mdl) + '</span>' : '<span class="muted">—</span>') + '</td>' +
+      '<td>' + (acct ? '<span class="clip acct" title="' + esc(acct) + '">' + esc(acct) + '</span>' : '<span class="muted">—</span>') + '</td>' +
       '<td>' + (ip ? '<span class="clip ip" title="' + esc(ip) + '">' + esc(ip) + '</span>' : '<span class="muted">—</span>') + '</td>' +
       '<td>' + (ua ? '<span class="clip" title="' + esc(ua) + '">' + esc(ua) + '</span>' : '<span class="muted">—</span>') + '</td>' +
       '<td class="num">' + fmtMs(e && e.duration_ms) + '</td>' +
