@@ -236,7 +236,13 @@ const reqEnd = src.indexOf('function fmtBytes');
 if ([escStart, escEnd, fmtStart, fmtEnd, reqStart, reqEnd].some(v => v < 0)) throw new Error('request log helpers not found');
 const ctx = { Date, Number, String, Math, RegExp, isNaN };
 vm.createContext(ctx);
+// requestLogText 现在引用 logAcctName（账号列别名化）：把真身连同它依赖的 aliasByUID8
+// 一起抽进沙箱。这里用**空**索引——本用例钉的是格式，别名行为由 TestAppJSLogAcctName 覆盖。
+const laStart = src.indexOf('function logAcctName');
+const laEnd = src.indexOf('\n}', laStart) + 2;
+if (laStart < 0 || laEnd < 1) throw new Error('logAcctName not found');
 vm.runInContext(
+  'var aliasByUID8 = {};\n' + src.slice(laStart, laEnd) +
   src.slice(escStart, escEnd) + src.slice(fmtStart, fmtEnd) + src.slice(reqStart, reqEnd) +
   '\nthis.requestLogText=requestLogText;',
   ctx
@@ -285,7 +291,13 @@ const end = src.indexOf('function reqOutcomeTag');
 if (start < 0 || end < 0) throw new Error('reqMatch not found');
 const ctx = {};
 vm.createContext(ctx);
-vm.runInContext(src.slice(start, end) + '\nthis.reqMatch=reqMatch;', ctx);
+// reqMatch 的账号匹配同时看别名与原标签：同样注入真身 + 一个带别名的索引，顺带钉住
+// 「按别名筛得中、按原标签也筛得中」。
+const la0 = src.indexOf('function logAcctName');
+const la1 = src.indexOf('\n}', la0) + 2;
+if (la0 < 0 || la1 < 1) throw new Error('logAcctName not found');
+vm.runInContext('var aliasByUID8 = {"uid8":"别名甲"};\n' + src.slice(la0, la1) +
+  '\n' + src.slice(start, end) + '\nthis.reqMatch=reqMatch;', ctx);
 const base = { outcome: 'success', client_ip: '203.0.113.7', user_agent: 'python-requests/2.31.0', model: 'cn:glm-5.3', account: '示例(uid8)', request_id: 'req-1' };
 const other = { outcome: 'http_error', client_ip: '198.51.100.4', user_agent: 'Mozilla/5.0 Chrome/120', model: 'global:hy3', account: '甲(uid9)', request_id: 'req-2' };
 const rows = [base, other];
@@ -299,6 +311,9 @@ process.stdout.write(JSON.stringify({
   multiMiss: pick({ q: 'glm chrome', outcome: '' }),
   byOutcome: pick({ q: '', outcome: 'http_error' }),
   combined: pick({ q: '198.51', outcome: 'http_error' }),
+  byAlias: pick({ q: '别名甲', outcome: '' }),
+  byRawLabel: pick({ q: '示例', outcome: '' }),
+  byUid8: pick({ q: 'uid8', outcome: '' }),
 }));`
 	f, err := os.CreateTemp(t.TempDir(), "request-filter-*.cjs")
 	if err != nil {
@@ -313,7 +328,9 @@ process.stdout.write(JSON.stringify({
 		t.Fatalf("request filter node test failed: %v\n%s", err, out)
 	}
 	// q 对 outcome 不参与匹配（outcome 有独立下拉），multiKw 里的 success 命中不了任何字段。
-	const want = `{"all":["req-1","req-2"],"byIP":["req-1"],"byUA":["req-2"],"byModel":["req-1"],"multiKw":[],"multiMiss":[],"byOutcome":["req-2"],"combined":["req-2"]}`
+	// byAlias/byRawLabel/byUid8：账号列显示别名后，按**别名**筛得中，按原始标签（昵称/uid8）
+	// 的老习惯也照旧筛得中（别名与原标签都在匹配文本里）。
+	const want = `{"all":["req-1","req-2"],"byIP":["req-1"],"byUA":["req-2"],"byModel":["req-1"],"multiKw":[],"multiMiss":[],"byOutcome":["req-2"],"combined":["req-2"],"byAlias":["req-1"],"byRawLabel":["req-1"],"byUid8":["req-1"]}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("request filter=%s want %s", out, want)
 	}
@@ -1269,5 +1286,107 @@ const tick = () => new Promise(r => setTimeout(r, 0));
 		`"apiAfterOldBlur":2,"editingStillTrueForNewCell":true}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("alias edit state machine=%s\nwant %s", strings.TrimSpace(string(out)), want)
+	}
+}
+
+// TestAppJSLogAcctName 请求日志账号列显示名 logAcctName 的行为测试（node 真跑抽取出的
+// 真身）。reqlog 在写入时把账号固化成 "昵称(uid8)" 标签（logfmt.Label，昵称为空时就是纯
+// uid8），前端靠尾部 uid8 反查别名——对历史归档同样生效。本用例钉住：
+//   - "昵称(uid8)" 命中别名 → 别名；
+//   - 未命中/未知 uid8 → **原样返回**（绝不吞信息）；
+//   - 纯 uid8 形态命中 → 别名；
+//   - 昵称本身含括号（"我的号(a)(21711c1f)"）→ 仍解析尾部那个 uid8；
+//   - 空值 / "-" / 残缺括号 → 原样；
+//   - 请求日志行文本（tooltip，也是「复制文本」的载体）真的换成别名。
+func TestAppJSLogAcctName(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; logAcctName test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const escStart = src.indexOf('function esc(');
+const escEnd = src.indexOf('function ago(');
+const fmtStart = src.indexOf('function fmtTok(');
+const fmtEnd = src.indexOf('function usStat(');
+const reqStart = src.indexOf('function requestLogText');
+const reqEnd = src.indexOf('function fmtBytes');
+const laStart = src.indexOf('function logAcctName');
+const laEnd = src.indexOf('\n}', laStart) + 2;
+if ([escStart, escEnd, fmtStart, fmtEnd, reqStart, reqEnd, laStart, laEnd].some(v => v < 0)) {
+  throw new Error('log helpers not found');
+}
+const ctx = { Date, Number, String, Math, RegExp, isNaN };
+vm.createContext(ctx);
+vm.runInContext(
+  'var aliasByUID8 = {"21711c1f":"钢琴师小号","deadbeef":"别名B"};\n' +
+  src.slice(laStart, laEnd) + src.slice(escStart, escEnd) + src.slice(fmtStart, fmtEnd) +
+  src.slice(reqStart, reqEnd) +
+  '\nthis.logAcctName=logAcctName; this.requestLogText=requestLogText;',
+  ctx
+);
+const c = ctx.logAcctName;
+const time = new Date(2026, 8, 28, 14, 5, 6).toISOString();
+const row = { time, status: 200, outcome: 'success', model: 'glm-5.3', duration_ms: 1250,
+              total_tokens: 2300, request_id: 'req-1' };
+const withAlias = ctx.requestLogText(Object.assign({}, row, { account: '菜市场里的钢琴师(21711c1f)' }));
+const unknown = ctx.requestLogText(Object.assign({}, row, { account: '菜市场里的钢琴师(99999999)' }));
+const emptyAcct = ctx.requestLogText(Object.assign({}, row, { account: '' }));
+process.stdout.write(JSON.stringify({
+  resolved: c('菜市场里的钢琴师(21711c1f)'),
+  unknownUid8: c('菜市场里的钢琴师(aaaaaaaa)'),
+  plainUid8: c('21711c1f'),
+  plainUnknown: c('12345678'),
+  nestedParens: c('我的号(a)(21711c1f)'),
+  shortParenNick: c('我的号(a)'),
+  unclosedParen: c('我的号(x'),
+  dash: c('-'),
+  empty: c(''),
+  nullValue: c(null),
+  rowHasAlias: withAlias.includes('钢琴师小号') && !withAlias.includes('菜市场里的钢琴师'),
+  rowUnknownRaw: unknown.includes('菜市场里的钢琴师(99999999)'),
+  rowEmptyDash: emptyAcct.includes('—'),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "logacctname-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("logAcctName node test failed: %v\n%s", err, out)
+	}
+	const want = `{"resolved":"钢琴师小号","unknownUid8":"菜市场里的钢琴师(aaaaaaaa)",` +
+		`"plainUid8":"钢琴师小号","plainUnknown":"12345678","nestedParens":"钢琴师小号",` +
+		`"shortParenNick":"我的号(a)","unclosedParen":"我的号(x","dash":"-","empty":"",` +
+		`"nullValue":"","rowHasAlias":true,"rowUnknownRaw":true,"rowEmptyDash":true}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("logAcctName=%s\nwant %s", strings.TrimSpace(string(out)), want)
+	}
+}
+
+// TestAppJSLogAcctNameWiring 请求日志账号列的接线钉子（**静态断言**，不是行为测试）：
+// ① loadOverview 里与 aliasByUID 一起建 uid8 索引；② logAcctName 存在；
+// ③ 搜索文本、表格单元格、行文本（tooltip/复制）三处都走了它。
+func TestAppJSLogAcctNameWiring(t *testing.T) {
+	raw, err := os.ReadFile("app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(raw)
+	for _, want := range []struct{ frag, why string }{
+		{"aliasByUID8[String(s.uid).slice(0, 8)] = s.alias;", "loadOverview 未建 uid8 → 别名索引"},
+		{"function logAcctName(label) {", "缺少 logAcctName"},
+		{"logAcctName(e && e.account), e && e.account", "搜索文本未把别名与原标签都纳入匹配"},
+		{"esc(logAcctName(e && e.account) || '—')", "请求记录表账号单元格未走 logAcctName"},
+		{"logAcctName(e && e.account) || '—',", "请求记录行文本（tooltip/复制）未走 logAcctName"},
+	} {
+		if !strings.Contains(js, want.frag) {
+			t.Errorf("app.js 缺少 %q（%s）", want.frag, want.why)
+		}
 	}
 }
