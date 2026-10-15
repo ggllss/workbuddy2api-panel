@@ -148,8 +148,13 @@ func TestAutoAllFirstCandidateServesNoExtraUpstream(t *testing.T) {
 	}
 }
 
-// TestAutoAllAllCandidatesUnavailable 全部候选都不可用 → 400 model_unavailable，
-// 文案点明「所有候选模型均不可用」并给出 cn:auto 保底建议；零上游请求。
+// TestAutoAllAllCandidatesUnavailable 候选跑完且**最后一个候选处于模型级全池锁定**
+// （BlockModelBackoff 写满每个号的 (账号,模型) 台账）→ 400 model_unavailable，文案
+// 点明「所有候选模型均不可用」并给出 cn:auto 保底建议；零上游请求。
+//
+// 归类：本用例钉的是**模型级**耗尽那一类（旧实现里它与账号级耗尽共用同一分支，
+// 所以旧断言"一律 400"仍然成立；账号级耗尽的可重试语义另见
+// TestAutoAllAccountExhaustionIsRetryable）。
 func TestAutoAllAllCandidatesUnavailable(t *testing.T) {
 	cap := &autoCapture{}
 	up := autoUpstream(t, cap, func(authz, model string) (int, string, bool) {
@@ -178,8 +183,56 @@ func TestAutoAllAllCandidatesUnavailable(t *testing.T) {
 	if !strings.Contains(hint, "2 candidate model(s)") {
 		t.Errorf("hint=%q 应说明跑完了几个候选", hint)
 	}
+	if !strings.Contains(hint, "blocked on every account") {
+		t.Errorf("hint=%q 应点明是「最后一个候选在全池被锁」这一类耗尽", hint)
+	}
 	if got := cap.modelList(); len(got) != 0 {
 		t.Errorf("上游请求 model 序列=%v want 空（全部候选无号可选时不该发出上游请求）", got)
+	}
+}
+
+// TestAutoAllAccountExhaustionIsRetryable 纯**账号级**耗尽（池里一个号都没有 / 号都在
+// 冷却，而模型级台账清白）→ 503 no_healthy_account（可重试），**不是** 400「所有候选
+// 模型均不可用」。这是用户拍板的耗尽语义区分：模型级全池锁定才是"这些模型都不能用"
+// （换模型才有用，不可重试），账号级耗尽只是"服务端暂时没容量"，稍后重试是对的。
+func TestAutoAllAccountExhaustionIsRetryable(t *testing.T) {
+	cases := []struct {
+		name string
+		pool func() *pool.Pool
+	}{
+		{"空池（一个号都没有）", func() *pool.Pool { return testPoolWith() }},
+		{"号都在账号级冷却（无模型级冷却）", func() *pool.Pool {
+			p := testPoolWith(&auth.Auth{UID: "a1", AccessToken: "at-1", ExpiresAt: 9999999999})
+			// CoolHard 余额耗尽：选号与兜底都跳过它（兜底只捞软冷却/熔断号）→ 选号返回 nil。
+			p.Cooldown("a1", pool.CoolHard, time.Hour, "余额不足")
+			return p
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cap := &autoCapture{}
+			up := autoUpstream(t, cap, func(authz, model string) (int, string, bool) {
+				return 200, sseOK, true
+			})
+			p := tc.pool()
+			p.SetAutoCandidates([]string{"cn:m1", "cn:m2"})
+			h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: time.Minute})
+
+			rec := doChat(h, autoChatBody(true))
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("code=%d body=%s want 503（账号级耗尽可重试）", rec.Code, rec.Body)
+			}
+			code, msg, _ := errEnvelope(t, rec)
+			if code != "no_healthy_account" {
+				t.Errorf("code=%q want no_healthy_account", code)
+			}
+			if strings.Contains(msg, "所有候选模型均不可用") {
+				t.Errorf("账号级耗尽不该用「所有候选模型均不可用」文案：%s", msg)
+			}
+			if got := cap.modelList(); len(got) != 0 {
+				t.Errorf("上游请求 model 序列=%v want 空", got)
+			}
+		})
 	}
 }
 
@@ -340,5 +393,84 @@ func TestAutoAllDoesNotChangeCnAuto(t *testing.T) {
 	}
 	if got := cap.modelList(); !reflect.DeepEqual(got, []string{"auto"}) {
 		t.Errorf("上游请求 model 序列=%v want [auto]（cn:auto 照旧剥前缀透传，不参与候选降级）", got)
+	}
+}
+
+// modelsEndpointIDs 取 /v1/models 的 id → 条目映射（本文件里只关心 auto:all）。
+func modelsEndpointIDs(t *testing.T, h *Handler) map[string]map[string]any {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/models", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /v1/models code=%d body=%s", rec.Code, rec.Body)
+	}
+	var resp struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("解析 /v1/models 失败: %v body=%s", err, rec.Body)
+	}
+	out := map[string]map[string]any{}
+	for _, m := range resp.Data {
+		if id, ok := m["id"].(string); ok {
+			out[id] = m
+		}
+	}
+	return out
+}
+
+// TestModelsListsAutoAllOnlyWhenConfigured /v1/models 的 auto:all 条目：
+//   - 候选非空 → 列出，且带非空说明字段（点明由 auto.candidates 驱动）；
+//   - 候选为空（功能关闭）→ **不列出**（不广告一个必然 400 的模型）。
+//
+// 同时钉住「条目按实时快照构造」：同一个 handler、同一份目录缓存，配置候选后
+// 立刻可见（不受 dynamicModelsTTL 影响）。
+func TestModelsListsAutoAllOnlyWhenConfigured(t *testing.T) {
+	// 目录缓存是包级共享状态：与既有 models 测试同口径，先清干净再跑，跑完还原，
+	// 免得住进假目录污染同包其他用例。
+	resetDynamicModelsCache := func() {
+		dynamicModelsCache.Lock()
+		dynamicModelsCache.ids = nil
+		dynamicModelsCache.fetched = time.Time{}
+		dynamicModelsCache.lastFail = time.Time{}
+		dynamicModelsCache.Unlock()
+	}
+	resetDynamicModelsCache()
+	t.Cleanup(resetDynamicModelsCache)
+
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 200, `{"code":0,"data":{"models":[{"id":"dyn-a"}],"agents":[{"name":"cli","models":["dyn-a"]}]}}`, false
+	})
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up})
+
+	// 未配置候选：不列出 auto:all（但上游目录照常列出）。
+	ids := modelsEndpointIDs(t, h)
+	if _, has := ids[AutoAllModel]; has {
+		t.Errorf("候选为空时不该列出 %s（必然 400 的模型不该被广告）", AutoAllModel)
+	}
+	if _, has := ids["cn:dyn-a"]; !has {
+		t.Fatalf("上游目录条目缺失：%v", ids)
+	}
+
+	// 配置候选后（同一 handler、目录缓存未失效）：立即出现，且说明字段非空。
+	p.SetAutoCandidates([]string{"cn:a", "global:b"})
+	ids = modelsEndpointIDs(t, h)
+	entry, has := ids[AutoAllModel]
+	if !has {
+		t.Fatalf("候选非空时应列出 %s：%v", AutoAllModel, ids)
+	}
+	if entry["object"] != "model" || entry["owned_by"] != "workbuddy" {
+		t.Errorf("auto:all 条目风格应与既有条目一致：%v", entry)
+	}
+	desc, _ := entry["description"].(string)
+	if strings.TrimSpace(desc) == "" {
+		t.Errorf("auto:all 条目必须带非空说明字段：%v", entry)
+	}
+	if !strings.Contains(desc, "auto.candidates") {
+		t.Errorf("说明字段应点明由 auto.candidates 驱动：%q", desc)
+	}
+	if !strings.Contains(desc, "2") {
+		t.Errorf("说明字段应带候选数量：%q", desc)
 	}
 }
