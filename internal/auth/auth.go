@@ -36,7 +36,12 @@ type Auth struct {
 	UID          string
 	EnterpriseID string
 	Nickname     string
-	FilePath     string // 来源文件；refresh 后原子写回此处
+	// Alias 本地自定义别名（面板点账号名就地改名），与上游同步的 Nickname 并存：
+	// 别名只属于本地，上游同步（pool.SetNickname）只写 Nickname，永不覆盖 Alias。
+	// 展示优先级 alias → nickname → 「未命名」；空 = 未设置（回落 Nickname）。
+	// 落盘位置：嵌套形 account.alias / 扁平形顶层 alias（见 Parse 与 SaveAtomic）。
+	Alias    string
+	FilePath string // 来源文件；refresh 后原子写回此处
 
 	// DeviceToken 设备风控 Token（X-Device-Token 头），来源 auth 文件的 device_token 键。
 	// 缺省为空 = 不注入该头（容器内无桌面端 Turing SDK 的常见部署）。
@@ -252,6 +257,7 @@ func Parse(raw []byte) (*Auth, error) {
 				UID          string `json:"uid"`
 				EnterpriseID string `json:"enterpriseId"`
 				Nickname     string `json:"nickname"`
+				Alias        string `json:"alias"`
 			} `json:"account"`
 			// DeviceToken 顶层 device_token（嵌套形与扁平形共用；手写时无需嵌进 auth 对象）。
 			DeviceToken string `json:"device_token"`
@@ -268,6 +274,7 @@ func Parse(raw []byte) (*Auth, error) {
 			UID:          n.Account.UID,
 			EnterpriseID: n.Account.EnterpriseID,
 			Nickname:     n.Account.Nickname,
+			Alias:        n.Account.Alias,
 			DeviceToken:  n.DeviceToken,
 		}
 	} else {
@@ -280,6 +287,7 @@ func Parse(raw []byte) (*Auth, error) {
 			UID          string `json:"uid"`
 			EnterpriseID string `json:"enterpriseId"`
 			Nickname     string `json:"nickname"`
+			Alias        string `json:"alias"`
 			DeviceToken  string `json:"device_token"`
 		}
 		if err := json.Unmarshal(raw, &f); err != nil {
@@ -294,6 +302,7 @@ func Parse(raw []byte) (*Auth, error) {
 			UID:          f.UID,
 			EnterpriseID: f.EnterpriseID,
 			Nickname:     f.Nickname,
+			Alias:        f.Alias,
 			DeviceToken:  f.DeviceToken,
 		}
 	}
@@ -301,6 +310,33 @@ func Parse(raw []byte) (*Auth, error) {
 		return nil, fmt.Errorf("parse_error: missing accessToken")
 	}
 	return &a, nil
+}
+
+// LocalAliasFromFile 读取既有 auth 文件里的**本地别名**（嵌套形 account.alias / 扁平形
+// 顶层 alias），供「用新凭证覆盖同一 uid 文件」的写入点先继承本地字段再落盘。
+//
+// 为什么需要：面板重登（session 失效后重新添加账号）、cockpit 导入、login.sh 重登都会
+// 用全新 Auth 覆盖同一 uid 的凭证文件。别名是**只属于本地**的字段（上游同步永不写它），
+// 若随凭证一起被覆盖，用户设过的别名会在一次常规重登后凭空消失。
+//
+// 只取别名：accessToken / refreshToken / expiresAt / realm / enterpriseId / nickname
+// 一律以新登录或新导入为准，绝不能用旧文件的值顶掉新凭证。
+//
+// 文件不存在（新 uid）、读取失败、JSON 损坏、无 alias 键 → 返回空串且不报错：
+// 继承是尽力而为，一个坏文件不该让重登失败。
+func LocalAliasFromFile(path string) string {
+	if path == "" {
+		return ""
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	a, err := Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return a.Alias
 }
 
 // SaveAtomic 以嵌套形原子写回 FilePath（tmp + rename），保持嵌套形（插件可读）格式。
@@ -333,6 +369,11 @@ func (a *Auth) SaveAtomic() error {
 	// （保持与插件 OAuth 输出形状一致，插件读取忽略未知键）。
 	if a.DeviceToken != "" {
 		doc["device_token"] = a.DeviceToken
+	}
+	// Alias 同样非空才写回 account.alias：清空别名 = 从文件里删除该键（回到旧文件
+	// 形状），Parse 读不到即空串，往返无损；也避免给从未设过别名的文件引入空键。
+	if a.Alias != "" {
+		doc["account"].(map[string]any)["alias"] = a.Alias
 	}
 	raw, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {

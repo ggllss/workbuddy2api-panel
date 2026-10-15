@@ -160,6 +160,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | **请求指标与脱敏日志** | 面板展示完成成功率 / HTTP 成功率 / 平均耗时 / 最近请求，响应带 `X-Request-Id`；JSONL 只归档请求元数据，不写提示词、响应正文或凭证 |
 | **浏览器内 OAuth 添加账号** | 面板「添加账号」按钮完成设备授权 → 凭证落盘 → **热加载进池（免重启）**，替代命令行 `login.sh` 流程 |
 | **在线配置编辑（热生效）** | 面板直接改 `config.json`：API 密钥 / `soft_rate` / 脱敏开关 / 池参数 / 任务排程**立即生效**；装配期字段（listen 等）保存后提示需重启。写入采用深合并 + 原子替换，保留未知键 |
+| **账号自定义别名** | 点账号名就地改名（回车 / 失焦保存，Esc 取消），别名落本地 auths 文件的 `account.alias`，与上游 `nickname` **并存**：展示优先级 alias → nickname → 「未命名」，上游昵称同步**永不覆盖**别名。多账号管理不用再靠 uid 认人 |
 | **积分任务体系** | 任务列表 / 接受 / 领取接口 + 面板弹窗；「一键完成」覆盖 **17 个任务**（对话 / 领养 / 桌面行为链 / 模板 / 灵感案例 / 画布 / 专家召唤 / 技能尝鲜 / 主题 / 资料库 / 夜猫子等），推进进度、等待异步计分落定后**自动领奖**，纯 API 零客户端依赖 |
 | **首启自动生成配置** | 目录下无 `config.json` 时自动生成推荐配置（含 `crypto/rand` 随机 `api_key`），双击即开 |
 | **粘性会话内容回退** | 客户端不发 `conversation_id` 时，用 `system + 首条 user` 哈希派生会话键（`d-` 前缀），通用 OpenAI 客户端也能享受粘性 |
@@ -632,7 +633,7 @@ http://127.0.0.1:7863/panel/
 
 | 视图 | 功能 |
 |---|---|
-| **账号池** | 统计条（账号总数 / 可用 / 冷却中 / 已禁用 / 积分剩余·总额 / 粘性会话）+ 账号表：健康色条与状态标签（可用 / 限流冷却 / 积分冷却 / 熔断 / 连败降权 / 已禁用）、积分量条、成功·失败计数、在途、最近一次用量（次数 / token / 延迟 / 速率）、最近成功时间；单号操作 签到 / 余额 / 任务 / 解冻 / 禁用 / 移除；批量「全部签到」「旅行巡检」「活跃上报」「全部保活」；下方**模型锁池**表列出被上游按模型限流的模型（整池不可用 / 没号可用 / 部分限流）、可选与总数、锁定账号数、最早解锁与全池解锁倒计时、限流原因，无锁定时显示「所有模型均可选」 |
+| **账号池** | 统计条（账号总数 / 可用 / 冷却中 / 已禁用 / 积分剩余·总额 / 粘性会话）+ 账号表：健康色条与状态标签（可用 / 限流冷却 / 积分冷却 / 熔断 / 连败降权 / 已禁用）、积分量条、成功·失败计数、在途、最近一次用量（次数 / token / 延迟 / 速率）、最近成功时间；**点账号名可就地改自定义别名**（回车 / 失焦保存，Esc 取消，见「账号别名」）；单号操作 签到 / 余额 / 任务 / 解冻 / 禁用 / 移除；批量「全部签到」「旅行巡检」「活跃上报」「全部保活」；下方**模型锁池**表列出被上游按模型限流的模型（整池不可用 / 没号可用 / 部分限流）、可选与总数、锁定账号数、最早解锁与全池解锁倒计时、限流原因，无锁定时显示「所有模型均可选」 |
 | **用量** | 指标卡（请求数 / 总 token / prompt / completion / 失败尝试 / 平均延迟，含占比与吐字速率）+ **Token 时序图**（渐变堆叠柱、均值参考线、峰值标注、悬停看单桶明细）+ **用量明细**（按账号 / 按模型 / 按域切换，可按合计 Token / 请求数 / 失败数 / 平均延迟排序，含 prompt·completion 占比条）+ **积分扣除历史**（按账号 / 按模型，折算「积分 / 1M Token」） |
 | **积分构成** | **积分到期分布**（按批次到期日聚合，颜色区分账号）+ **账号对比**（按来源归并的面额 / 余额 / 包数卡片与混合构成条）+ 逐包明细（按到期日排序，默认展开最近到期的 `panel.package_detail_limit` 个，其余与已用完的包折叠） |
 | **任务中心** | 成长任务队列：一键扫描全部账号待办 → 按账号排队执行（账号内串行，账号间可选并发 1-3），进度实时更新；另含开学季券码查询。详见 [任务中心](#-任务中心面板新视图) |
@@ -663,6 +664,18 @@ http://127.0.0.1:7863/panel/
 保存后会提示"需重启进程生效"。配置写入采用「深合并且原子替换」：只更新面板表单覆盖的键，
 用户手写的未知键与其余字段原样保留。
 
+### 账号别名（自定义显示名）
+
+多账号场景下，上游返回的昵称常常是「用户1234」这类看不出是谁的名字，因此面板支持给每个账号设**本地自定义别名**：
+
+- **怎么改**：点账号表里账号名（名称单元格，悬停有提示）→ 原地变输入框 → **回车或失焦保存、Esc 取消**。没有额外的「改名」按钮；
+- **展示优先级**：`别名 → 上游昵称 → 未命名`。别名与昵称并存时，上游昵称放进名称的悬停提示；
+- **清除**：把输入框清空保存即可（空别名 = 清除 = 回落到上游昵称）；
+- **约束**：上限 **32 显示宽度**（CJK / 全角 / emoji 计 2 列，与日志表格同一口径），纯空白被拒（前端与后端各校验一次，前端还给出失败 toast）；
+- **与上游的关系**：别名是**独立的本地字段**，存在 auths 文件的 `account.alias`。上游昵称同步（面板「刷新」触发的 `syncNicknames`）只更新 `account.nickname`，**永不覆盖别名**——这正是把别名做成独立字段而不是直接改写 nickname 的原因。展示与选号/保活/签到等池行为无关，别名只影响面板显示（**日志仍用上游 nickname**，保持历史日志语义稳定）。
+
+- **凭证重写不丢**：面板重新添加账号（OAuth 重登）、cockpit 导入、`./login.sh` 重登都会覆盖同一 uid 的凭证文件——这三条路径都会先继承旧文件里的别名再落盘；只继承别名，`accessToken` / `refreshToken` / `expiresAt` / `nickname` 等一律以新登录或新导入为准。
+
 ### 面板接口（`/panel/api/*`）
 
 与页面同一 Bearer 鉴权，可直接脚本化调用：
@@ -670,7 +683,7 @@ http://127.0.0.1:7863/panel/
 | 分组 | 端点 |
 |---|---|
 | 只读 | `GET overview` · `GET usage`（`hours` 或 `from`/`to`）· `GET packages` · `GET models` · `GET model_probes` · `GET logs` · `GET request_metrics` · `GET request_logs`（`limit` / `outcome` / `account` / `model` / `client_ip` / `user_agent` / `from` / `to`）· `GET config` · `GET tasks/queue` · `GET school/vouchers` |
-| 账号运维 | `POST accounts/{uid}/checkin` · `balance` · `revive` · `disable` · `remove`；`POST checkin_all` · `travel_all` · `activity_all` · `keepalive_all` · `balance_all` |
+| 账号运维 | `POST accounts/{uid}/checkin` · `balance` · `revive` · `disable` · `alias`（body `{"alias":"..."}`，空串 = 清除别名，未知 uid → 404）· `remove`；`POST checkin_all` · `travel_all` · `activity_all` · `keepalive_all` · `balance_all` |
 | 任务 | `GET accounts/{uid}/tasks`；`POST accounts/{uid}/tasks/accept` · `accept_all` · `claim` · `auto` · `auto_all`；`POST tasks/scan_all` · `tasks/run_queue` |
 | 添加账号 | `POST login/start` · `GET login/poll` · `GET login/regions` · `POST import/cockpit` |
 | 写入 | `POST config`（校验 → 落盘 → 热应用，返回需重启字段清单）· `POST usage/save`（立即把内存用量落盘） |
@@ -821,6 +834,7 @@ python3 scripts/probe_max_tokens.py   --base http://127.0.0.1:7863/v1 --key sk-x
 ### 账号管理
 
 - 多账号复制 `auths/workbuddy-<uid>.json` 即可，池启动时自动对齐目录
+- 账号显示名可用面板「点账号名就地改名」设**本地自定义别名**（auths 文件 `account.alias`，空 = 未设置）；上游昵称同步只写 `account.nickname`，不覆盖别名
 - Session 失效账号被禁用（`disabled_reason` 透出在 `/status`）后，可用 `./login.sh` 重新登录覆盖凭证；已持久化 `disabled=true` 的账号可在源码侧调用 `Pool.ReviveDisabled(uid)` 复活（`state.json` 中清除 `disabled` 标志）
 - 备份 = `auths/`（凭证）+ `data/state.json`（池状态：积分 / 冷却 / 计数）；配置 Upstash 后状态另镜像至 Redis（7 天 TTL）
 

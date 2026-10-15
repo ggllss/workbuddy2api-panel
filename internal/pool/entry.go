@@ -63,6 +63,7 @@ type TokenUsageDelta struct {
 type Status struct {
 	UID          string `json:"uid"`
 	Nickname     string `json:"nickname,omitempty"`
+	Alias        string `json:"alias,omitempty"` // 本地别名（面板可编辑）：空 = 未设置，展示回落 alias → nickname → 「未命名」；上游同步只写 Nickname，不覆盖它
 	Credits      int64  `json:"credits"`
 	CreditsTotal int64  `json:"credits_total,omitempty"` // 积分总额度（各套餐聚合）；0 = 未知（旧 state/查询失败）
 	// CreditsExpiring / CreditsEarliestExpiry / CreditsEarliestRemaining 描述当前积分中

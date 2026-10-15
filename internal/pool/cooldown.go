@@ -49,6 +49,40 @@ func (p *Pool) SetNickname(uid, nickname string) bool {
 	return true
 }
 
+// SetAlias 设置/清除账号本地自定义别名（面板点名字就地改名），并回写 auths 凭证文件。
+// 与 SetNickname 的语义差异（刻意）：**空串是合法入参 = 清除别名**（回落到上游昵称），
+// 因此不能像 SetNickname 那样把空串当非法值拒绝。别名只属于本地，上游同步
+// （SetNickname）只写 Nickname，永不覆盖 Alias。
+//
+// 返回值：uid 为空 / uid 不在池中 / 写盘失败 = false；别名未变化（含已是空串再清空）
+// = true（幂等成功，不写盘，避免面板把无变化的重命名报成失败）。
+func (p *Pool) SetAlias(uid, alias string) bool {
+	if uid == "" {
+		return false
+	}
+	p.mu.RLock()
+	e, ok := p.byUID[uid]
+	p.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	a := e.a
+	a.Lock()
+	changed := a.Alias != alias
+	if changed {
+		a.Alias = alias
+	}
+	a.Unlock()
+	if !changed {
+		return true
+	}
+	if err := a.SaveAtomic(); err != nil {
+		log.Printf("WARN: [pool] alias save %s: %v", uid, err)
+		return false
+	}
+	return true
+}
+
 // NoteCheckinDone 标记账号今日已签到（签到成功与上游"今天已签到"幂等拒绝均算）。
 // 记录本地日期，跨零点自然过期；不触碰冷却/禁用状态（签到与冷却域正交）。
 func (p *Pool) NoteCheckinDone(uid string) {

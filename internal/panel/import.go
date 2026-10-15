@@ -111,6 +111,10 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 			FilePath:     filepath.Join(p.cfg.AuthDir, fmt.Sprintf("workbuddy-%s.json", uid)),
 		}
 
+		// 同一 uid 重新导入（覆盖既有凭证文件）：继承旧文件里的本地别名——别名只属于本地，
+		// 不该被凭证重写抹掉；其余字段一律以本次导入为准。
+		a.Alias = auth.LocalAliasFromFile(a.FilePath)
+
 		if realm == "global" {
 			if _, err := auth.BackfillRealmFor(a, "global"); err != nil {
 				skipped++
