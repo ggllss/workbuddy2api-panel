@@ -13,6 +13,9 @@ let refTimer = null;
    的首次 loadOverview 就会填充，密钥门通过后 btnKey → start() 再跑一次，所以**任何视图
    都能拿到别名**，即使从未进过账号池。 */
 let aliasByUID = {};
+// aliasByUID8 是 uid 前 8 位 → 别名：请求日志里的账号列由 reqlog 在写入时固化成
+// "昵称(uid8)" 标签（internal/logfmt.Label，昵称为空时就是纯 uid8），只有 uid8 可反查。
+let aliasByUID8 = {};
 function acctName(uid, nick, fallback) {
   const u = uid == null ? '' : String(uid);
   const alias = u ? aliasByUID[u] : '';
@@ -20,6 +23,19 @@ function acctName(uid, nick, fallback) {
   if (nick) return nick;
   if (fallback != null) return fallback;
   return u ? u.slice(0, 8) : '';
+}
+/* logAcctName 请求日志账号列显示名：把 "昵称(uid8)" / 纯 uid8 标签换成别名。
+   因为 logfmt.Label 已经把 uid8 内嵌在标签里，前端可反查别名——**对已归档的历史日志
+   同样生效**，不需要改归档格式、不需要等新数据。
+   匹配不到（未知 uid8、标签形态不符、空值）一律原样返回，绝不吞信息。
+   注：昵称本身可能含括号，故只认**结尾**那个括号组。 */
+function logAcctName(label) {
+  const s = label == null ? '' : String(label);
+  if (!s) return s;
+  const m = /\(([A-Za-z0-9_-]{1,8})\)$/.exec(s);
+  const uid8 = m ? m[1] : (/^[A-Za-z0-9_-]{1,8}$/.test(s) ? s : '');
+  if (!uid8) return s;
+  return aliasByUID8[uid8] || s;
 }
 // 别名就地编辑进行中（保存 / 取消前为 true）。renderAccounts 据此跳过重绘：整表重写
 // innerHTML 会把正在编辑的 <input> 移出 DOM，浏览器随即触发 blur → 半成品被当成
@@ -526,10 +542,16 @@ async function loadOverview(quiet) {
   try {
     const d = await api('overview');
     overviewData = d;
-    // 别名映射（uid → alias）：所有视图的账号显示名都经 acctName 取这里，故每次 overview
-    // 刷新都重建一次（清空重建，避免已移除账号的别名残留）。
+    // 别名映射（uid → alias，另加 uid8 → alias 供请求日志反查）：所有视图的账号显示名都
+    // 经 acctName / logAcctName 取这里，故每次 overview 刷新都重建一次（清空重建，避免
+    // 已移除账号的别名残留）。
     aliasByUID = {};
-    for (const s of (d.accounts || [])) if (s.alias) aliasByUID[s.uid] = s.alias;
+    aliasByUID8 = {};
+    for (const s of (d.accounts || [])) {
+      if (!s.alias || !s.uid) continue;
+      aliasByUID[s.uid] = s.alias;
+      aliasByUID8[String(s.uid).slice(0, 8)] = s.alias;
+    }
     $('sTotal').textContent = d.total;
     $('sHealthy').textContent = d.healthy;
     $('sCooling').textContent = d.cooling;
@@ -958,7 +980,9 @@ function reqMatch(e, f) {
   f = f || reqFilter;
   if (f.outcome && String(e && e.outcome || '') !== f.outcome) return false;
   if (f.q) {
-    const text = [e && e.client_ip, e && e.user_agent, e && e.model, e && e.account, e && e.request_id]
+    // 账号同时放进「别名」和「原始标签」：用户按看到的别名筛得中，按昵称/uid8 的老习惯
+    // 也照旧筛得中（别名未命中时 logAcctName 返回原标签，这里等价于原来的行为）。
+    const text = [e && e.client_ip, e && e.user_agent, e && e.model, logAcctName(e && e.account), e && e.account, e && e.request_id]
       .filter(Boolean).join(' ').toLowerCase();
     for (const kw of f.q.toLowerCase().split(/\s+/).filter(Boolean)) {
       if (!text.includes(kw)) return false;
@@ -1003,7 +1027,7 @@ function renderRequestTable() {
       '<td class="num">' + esc(when) + '</td>' +
       '<td>' + reqOutcomeTag(e) + '</td>' +
       '<td>' + esc(e && e.model || '—') + '</td>' +
-      '<td>' + esc(e && e.account || '—') + '</td>' +
+      '<td>' + esc(logAcctName(e && e.account) || '—') + '</td>' +
       '<td>' + (ip ? '<span class="clip ip" title="' + esc(ip) + '">' + esc(ip) + '</span>' : '<span class="muted">—</span>') + '</td>' +
       '<td>' + (ua ? '<span class="clip" title="' + esc(ua) + '">' + esc(ua) + '</span>' : '<span class="muted">—</span>') + '</td>' +
       '<td class="num">' + fmtMs(e && e.duration_ms) + '</td>' +
@@ -1056,7 +1080,7 @@ function requestLogText(e) {
     when,
     String(e && e.status || '—') + ' ' + (outcomeLabel[e && e.outcome] || (e && e.outcome) || '—'),
     e && e.model || '—',
-    e && e.account || '—',
+    logAcctName(e && e.account) || '—',
     e && e.client_ip || '—',
     e && e.user_agent || '—',
     fmtMs(e && e.duration_ms),
