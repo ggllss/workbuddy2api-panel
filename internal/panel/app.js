@@ -6,6 +6,28 @@ let view = 'accounts';
 let overviewData = null, cfgLoaded = null;
 let logPin = true, loginState = null, loginTimer = null;
 let refTimer = null;
+
+/* ── 账号显示名（统一口径）─────────────────────────────────────────────
+   优先级：本地别名 → 上游昵称 → 调用方给定的兜底（缺省 uid 前 8 位）。
+   aliasByUID 由 loadOverview 用 /panel/api/overview 的 accounts[].alias 维护：start()
+   的首次 loadOverview 就会填充，密钥门通过后 btnKey → start() 再跑一次，所以**任何视图
+   都能拿到别名**，即使从未进过账号池。 */
+let aliasByUID = {};
+function acctName(uid, nick, fallback) {
+  const u = uid == null ? '' : String(uid);
+  const alias = u ? aliasByUID[u] : '';
+  if (alias) return alias;
+  if (nick) return nick;
+  if (fallback != null) return fallback;
+  return u ? u.slice(0, 8) : '';
+}
+// 别名就地编辑进行中（保存 / 取消前为 true）。renderAccounts 据此跳过重绘：整表重写
+// innerHTML 会把正在编辑的 <input> 移出 DOM，浏览器随即触发 blur → 半成品被当成
+// 「用户点走了」提交（用户实测「编辑别名时隔 4-5 秒自动回车」，即 5 秒轮询重绘所致）。
+// aliasEditCell 记录当前编辑的单元格：点开另一行时旧输入框的 blur→commit→restore 会先跑，
+// 靠它判定「谁在清编辑态」，避免旧输入框把新输入框的守卫一起清掉。
+let aliasEditing = false;
+let aliasEditCell = null;
 /* 视图级筛选状态（模块级声明放在文件顶部，避免顶层 go() 早于声明执行时踩 TDZ）。 */
 let mdFilter = { q: '', realm: '', cap: '', effort: '', promo: '', sort: 'default' };
 let mdAll = [], mdProbes = {}, mdProbeOf = () => undefined;
@@ -372,6 +394,10 @@ setTimeout(() => {
 
 /* ── 账号池 ───────────────────────────────────────────────────────── */
 function renderAccounts(list) {
+  // 别名就地编辑进行中：整表重写 innerHTML 会把正在编辑的 <input> 移出 DOM，浏览器随即
+  // 触发 blur，半成品会被当作「用户点走了」提交。这里直接跳过本次重绘（表格数据停更几秒
+  // 可接受），编辑结束（保存 / 取消）时 commit/restore 会立刻 loadOverview(true) 补一次。
+  if (aliasEditing) return;
   const tb = $('accBody');
   if (!list.length) {
     tb.innerHTML = '<tr><td colspan="9"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>';
@@ -500,6 +526,10 @@ async function loadOverview(quiet) {
   try {
     const d = await api('overview');
     overviewData = d;
+    // 别名映射（uid → alias）：所有视图的账号显示名都经 acctName 取这里，故每次 overview
+    // 刷新都重建一次（清空重建，避免已移除账号的别名残留）。
+    aliasByUID = {};
+    for (const s of (d.accounts || [])) if (s.alias) aliasByUID[s.uid] = s.alias;
     $('sTotal').textContent = d.total;
     $('sHealthy').textContent = d.healthy;
     $('sCooling').textContent = d.cooling;
@@ -547,6 +577,8 @@ function aliasWidth(s) {
 
 function startAliasEdit(cell) {
   if (cell.dataset.editing === '1') return;
+  aliasEditing = true; // 进入编辑态：renderAccounts 停止重绘，直到 restore() 清掉
+  aliasEditCell = cell;
   const uid = cell.dataset.u;
   const prev = cell.innerHTML;
   const input = document.createElement('input');
@@ -561,16 +593,28 @@ function startAliasEdit(cell) {
   input.focus();
   input.select();
   let settled = false;
-  const restore = () => { cell.innerHTML = prev; cell.dataset.editing = ''; };
+  // restore 是编辑态的唯一出口：清输入框、清 editing 标记、清全局编辑态（放行重绘）。
+  // 只有「当前编辑者」能清全局标记：点开另一行的输入框时，旧输入框的 blur→commit→restore
+  // 会先执行，若这里无条件清零，新输入框就不再受重绘守卫保护。
+  const restore = () => {
+    cell.innerHTML = prev;
+    cell.dataset.editing = '';
+    if (aliasEditCell === cell) { aliasEditing = false; aliasEditCell = null; }
+  };
   const commit = async () => {
     if (settled) return;
     settled = true;
+    // 防御：只有输入框仍在文档里才把 blur 当「用户主动失焦」。元素已被外部重绘移除时
+    // （renderAccounts 的跳过守卫之外还有别的路径，例如视图切换/整页刷新）放弃提交，
+    // 绝不把半成品写上去。
+    if (!input.isConnected) { restore(); return; }
     const raw = input.value;
     const val = raw.trim();
-    if (raw !== '' && val === '') { restore(); toast('别名不能全为空白', 'err'); return; }
+    if (raw !== '' && val === '') { restore(); toast('别名不能全为空白', 'err'); loadOverview(true); return; }
     if (aliasWidth(val) > MAX_ALIAS_WIDTH) {
       restore();
       toast('别名过长：上限 ' + MAX_ALIAS_WIDTH + ' 显示宽度（中文按 2 计）', 'err');
+      loadOverview(true);
       return;
     }
     restore();
@@ -582,7 +626,13 @@ function startAliasEdit(cell) {
   };
   input.addEventListener('keydown', ev => {
     if (ev.key === 'Enter') { ev.preventDefault(); commit(); }
-    else if (ev.key === 'Escape') { ev.preventDefault(); settled = true; restore(); }
+    else if (ev.key === 'Escape') {
+      // Esc 取消：清编辑态并刷新一次（编辑期间跳过的重绘在这里补上）。
+      ev.preventDefault();
+      settled = true;
+      restore();
+      loadOverview(true);
+    }
   });
   input.addEventListener('blur', () => { commit(); });
 }
@@ -1342,7 +1392,7 @@ async function pollLogin() {
       stopPoll();
       $('addReady').hidden = true;
       $('addDone').hidden = false;
-      $('addDone').textContent = '已添加 ' + (r.nickname || r.uid) + (r.realm === 'global' ? '（国际版）' : '') + (r.credits >= 0 ? ' · 积分 ' + r.credits + (r.credits_total > 0 ? '/' + r.credits_total : '') : '') + '，账号已载入池中';
+      $('addDone').textContent = '已添加 ' + acctName(r.uid, r.nickname, r.uid) + (r.realm === 'global' ? '（国际版）' : '') + (r.credits >= 0 ? ' · 积分 ' + r.credits + (r.credits_total > 0 ? '/' + r.credits_total : '') : '') + '，账号已载入池中';
       setTimeout(() => { closeAdd(); loadOverview(true); }, 1600);
     }
   } catch (e) {
@@ -1803,7 +1853,7 @@ async function loadSchoolVouchers() {
     const ok = arr.filter(a => !a.error);
     const total = ok.reduce((n, a) => n + (a.vouchers || []).length, 0);
     body.innerHTML = ok.filter(a => (a.vouchers || []).length).map(a =>
-      '<div class="vc-acct"><span class="nm">' + esc(a.nickname || a.uid) + '</span>' +
+      '<div class="vc-acct"><span class="nm">' + esc(acctName(a.uid, a.nickname, a.uid)) + '</span>' +
       '<span>' + a.vouchers.length + ' 张</span></div>' +
       a.vouchers.map(vcCard).join('')
     ).join('') || '<div class="empty"><div class="big">🎟️</div>还没有抽到券</div>';
@@ -1811,7 +1861,7 @@ async function loadSchoolVouchers() {
     const errs = arr.filter(a => a.error);
     if (errs.length) {
       body.insertAdjacentHTML('beforeend', '<div class="note" style="color:var(--warn);margin-top:8px">查询失败：' +
-        errs.map(a => esc(a.nickname || a.uid.slice(0, 8)) + '（' + esc(a.error) + '）').join('、') + '</div>');
+        errs.map(a => esc(acctName(a.uid, a.nickname)) + '（' + esc(a.error) + '）').join('、') + '</div>');
     }
     body.querySelectorAll('button[data-copy]').forEach(b => b.onclick = async () => {
       try { await copyText(b.dataset.copy); toast('券码已复制', 'ok'); }
@@ -1909,7 +1959,7 @@ function renderQueue(groups, progress, emptyTitle, emptyDesc) {
   let total = 0;
   list.innerHTML = groups.map(g => {
     total += g.rows.length;
-    return '<div class="qgroup"><header><span class="nm">' + esc(g.nick || g.uid.slice(0, 12)) + '</span><span class="cnt">' + g.rows.length + ' 项待办</span></header>' +
+    return '<div class="qgroup"><header><span class="nm">' + esc(acctName(g.uid, g.nick, g.uid.slice(0, 12))) + '</span><span class="cnt">' + g.rows.length + ' 项待办</span></header>' +
       g.rows.map(qrowHTML).join('') + '</div>';
   }).join('');
   $('qcSummary').textContent = total + ' 项';
@@ -2119,7 +2169,9 @@ function renderUsageDim() {
   });
   $('usDimHead').innerHTML = usDimHead(usDim);
   $('usDimBody').innerHTML = rows.map(x =>
-    usRow(usDim === 'account' ? String(x.key || '').slice(0, 8) : x.key,
+    // 按账号维度：主行名别名优先，兜底仍是 uid8；**不把昵称插进来**——昵称本就是下面那行
+    // note（x.extra），插进来会和 sub 重复显示。
+    usRow(usDim === 'account' ? acctName(x.key, null, String(x.key || '').slice(0, 8)) : x.key,
       usDim === 'account' ? (x.extra || '') : '',
       x,
       usDim === 'account' ? '<td class="num">' + esc(x.realm || '') + '</td>' : '',
@@ -2172,7 +2224,7 @@ function renderCreditDim() {
     const accounts = d.credit_by_account || [];
     $('usCreditBody').innerHTML = accounts.map(row => {
       const uid = String(row.key || '');
-      const account = row.nickname || uid.slice(0, 8) || '—';
+      const account = acctName(uid, row.nickname, uid.slice(0, 8) || '—');
       return '<tr>' +
         '<td class="mark" aria-hidden="true"></td>' +
         '<td>' + esc(account) + '<div class="note">' + esc(row.realm || '') + ' · ' + esc(uid.slice(0, 8)) + '</div></td>' +
@@ -2666,7 +2718,7 @@ function pkAccountSegments(a, now) {
       days: expiresAt == null ? null : Math.max(0, Math.ceil((expiresAt - now) / PK_DAY_MS)),
       source: p.name || '积分',
       uid: String(a.uid || ''),
-      accountName: a.nickname || String(a.uid || '').slice(0, 8) || '未命名账号',
+      accountName: acctName(a.uid, a.nickname, String(a.uid || '').slice(0, 8) || '未命名账号'),
     });
     balance -= amount;
   }
@@ -2732,7 +2784,7 @@ function renderExpiryDistribution(list, now) {
   const legend = (list || []).filter(a =>
     a && !a.error && a.uid && pkAccountSegments(a, now).some(s => s.days != null)
   ).map(a => '<span><i style="background:' + (colors.get(String(a.uid)) || 'var(--accent)') +
-    '"></i>' + esc(a.nickname || String(a.uid).slice(0, 8)) + '</span>').join('');
+    '"></i>' + esc(acctName(a.uid, a.nickname)) + '</span>').join('');
   const hdr = '<div class="pk-expiry-hdr"><span>剩余天数</span><span style="text-align:center">各账号该批剩余</span><b>剩余积分</b></div>';
   $('pkExpiry').innerHTML = (rows
     ? hdr + '<div class="pk-expiry-chart">' + rows + '</div>'
@@ -2773,7 +2825,7 @@ function renderPackages(d, detailLimit) {
   $('pkSummary').innerHTML = list.map(a => {
     if (a.error) {
       return '<div class="pk-card"><div class="who"><span class="nm">' +
-        esc((a.nickname || a.uid.slice(0, 8))) + '</span>' +
+        esc(acctName(a.uid, a.nickname)) + '</span>' +
         '<span class="realm">' + esc(a.realm || '') + '</span></div>' +
         '<div class="err">查询失败：' + esc(a.error) + '</div></div>';
     }
@@ -2801,7 +2853,7 @@ function renderPackages(d, detailLimit) {
           ' 1 0" title="' + esc(title) + '"></i>';
       }).join('') + '</div>' : '';
     return '<div class="pk-card">' +
-      '<div class="who"><span class="nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</span>' +
+      '<div class="who"><span class="nm">' + esc(acctName(a.uid, a.nickname)) + '</span>' +
       '<span class="realm">' + esc(a.realm || '') + '</span></div>' +
       '<div class="big">' + fmtTok(a.remain) + '</div>' +
       '<div class="sub">共 ' + fmtTok(a.size) + ' · ' + (a.packages || []).length +
@@ -2852,7 +2904,7 @@ function renderPackages(d, detailLimit) {
         groups.used.map(p => rowOf(p, 'used')).join('')
       : '';
     return '<div class="box"><header><h3>' +
-      esc(a.nickname || a.uid.slice(0, 8)) + ' · ' + esc(a.realm || '') +
+      esc(acctName(a.uid, a.nickname)) + ' · ' + esc(a.realm || '') +
       '</h3><span class="grow"></span><span class="note">余额 ' + fmtTok(a.remain) +
       ' / 总额 ' + fmtTok(a.size) + ' · 可用 ' + (groups.visible.length + groups.rest.length) + ' 个包' +
       (groups.used.length ? ' / 已用完 ' + groups.used.length + ' 个' : '') +
@@ -3002,13 +3054,13 @@ function renderExpiry(d) {
   const rows = keyed.map(({ a }) => {
     if (a.error) {
       return '<div class="exp-row"><span class="exp-dot" style="background:var(--ink-3)"></span>' +
-        '<span class="exp-nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</span>' +
+        '<span class="exp-nm">' + esc(acctName(a.uid, a.nickname)) + '</span>' +
         '<span class="exp-main err">查询失败：' + esc(a.error) + '</span></div>';
     }
     const bs = expBatches(a.packages).filter(b => expDaysLeft(b.date, today) >= 0);
     if (!bs.length) {
       return '<div class="exp-row"><span class="exp-dot" style="background:var(--ok)"></span>' +
-        '<span class="exp-nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</span>' +
+        '<span class="exp-nm">' + esc(acctName(a.uid, a.nickname)) + '</span>' +
         '<span class="exp-main">7 天内无到期积分</span></div>';
     }
     const first = bs[0];
@@ -3025,7 +3077,7 @@ function renderExpiry(d) {
     const rest = bs.slice(1, 4).map(b =>
       '随后 ' + esc(b.date.slice(5)) + ' · ' + fmtTok(b.remain)).join('　') + more;
     return '<div class="exp-row"><span class="exp-dot" style="background:' + cls + '"></span>' +
-      '<span class="exp-nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</span>' +
+      '<span class="exp-nm">' + esc(acctName(a.uid, a.nickname)) + '</span>' +
       '<span class="exp-main">最近到期 <b>' + esc(first.date) + '</b>（' + dayWord +
       '）· 该批 <b>' + fmtTok(first.remain) + '</b> 积分 · 到期前日均需耗 ≥<b>' +
       fmtTok(daily) + '</b>' +
@@ -3068,7 +3120,7 @@ function renderExpirySnapshot(d) {
     return x.key - y.key;
   });
   const rows = keyed.map(({ a, ms }) => {
-    const nm = esc(a.nickname || String(a.uid || '').slice(0, 8));
+    const nm = esc(acctName(a.uid, a.nickname));
     if (!ms || !a.credits_earliest_remaining) {
       return '<div class="exp-row"><span class="exp-dot" style="background:var(--ok)"></span>' +
         '<span class="exp-nm">' + nm + '</span>' +

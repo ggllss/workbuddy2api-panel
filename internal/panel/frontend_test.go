@@ -618,7 +618,7 @@ const end = src.indexOf('function renderPackages');
 if (start < 0 || end < 0) throw new Error('detail group functions not found');
 const ctx = { Date, Math, Number, String, Map, Array, Object, isFinite };
 vm.createContext(ctx);
-vm.runInContext(src.slice(start, end) + '\nthis.pkDetailGroups = pkDetailGroups; this.pkDetailLimit = pkDetailLimit;', ctx);
+vm.runInContext('var aliasByUID = {};\n' + src.slice(src.indexOf('function acctName'), src.indexOf('\n}', src.indexOf('function acctName')) + 2) + src.slice(start, end) + '\nthis.pkDetailGroups = pkDetailGroups; this.pkDetailLimit = pkDetailLimit;', ctx);
 const input = [
   { id: 'small-late', size: 100, remain: 1, expires_at: 400 },
   { id: 'zero-early-b', size: 200, remain: 0, expires_at: 200 },
@@ -674,7 +674,7 @@ const end = src.indexOf('function renderExpiryDistribution');
 if (start < 0 || end < 0) throw new Error('expiry summary functions not found');
 const ctx = { Date, Math, Number, String, Map, Array, Object, isFinite };
 vm.createContext(ctx);
-vm.runInContext(src.slice(start, end) + '\nthis.summarizeCreditDays = summarizeCreditDays; this.pkAccountColorMap = pkAccountColorMap;', ctx);
+vm.runInContext('var aliasByUID = {};\n' + src.slice(src.indexOf('function acctName'), src.indexOf('\n}', src.indexOf('function acctName')) + 2) + src.slice(start, end) + '\nthis.summarizeCreditDays = summarizeCreditDays; this.pkAccountColorMap = pkAccountColorMap;', ctx);
 const day = 86400000, now = 100000;
 const out = ctx.summarizeCreditDays([
   { uid: 'a', remain: 100, packages: [
@@ -854,7 +854,7 @@ const ctx = {
   lastPackages: null, lastPackagesAt: 0,
 };
 vm.createContext(ctx);
-vm.runInContext(src.slice(start, end) + '\nthis.renderExpiry = renderExpiry;', ctx);
+vm.runInContext('var aliasByUID = {};\n' + src.slice(src.indexOf('function acctName'), src.indexOf('\n}', src.indexOf('function acctName')) + 2) + src.slice(start, end) + '\nthis.renderExpiry = renderExpiry;', ctx);
 const iso = n => {
   const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + n);
   const p = x => String(x).padStart(2, '0');
@@ -913,6 +913,11 @@ const src = fs.readFileSync(process.argv[2], 'utf8');
 const start = src.indexOf('function renderExpirySnapshot');
 const end = src.indexOf('async function loadExpiry');
 if (start < 0 || end < 0 || end < start) throw new Error('expiry snapshot region not found');
+// 到期卡片用 acctName 取账号显示名（别名优先）：把真身连同它依赖的 aliasByUID 一起抽进
+// 沙箱，而不是拿桩顶替——否则这条用例会掩盖 acctName 的优先级回归。
+const a0 = src.indexOf('function acctName');
+const a1 = src.indexOf('\n}', a0) + 2;
+if (a0 < 0 || a1 < 1) throw new Error('acctName not found');
 const sinks = {};
 const mk = id => (sinks[id] = { innerHTML: '', textContent: '', hidden: true });
 const ctx = {
@@ -922,7 +927,8 @@ const ctx = {
   Date, Math, Number, String, Map, Array, Object, isNaN,
 };
 vm.createContext(ctx);
-vm.runInContext(src.slice(start, end) + '\nthis.renderExpirySnapshot = renderExpirySnapshot;', ctx);
+vm.runInContext('var aliasByUID = {};\n' + src.slice(a0, a1) + '\n' + src.slice(start, end) +
+  '\nthis.renderExpirySnapshot = renderExpirySnapshot;', ctx);
 const day = n => {
   const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + n);
   return d.toISOString();
@@ -1058,5 +1064,210 @@ process.stdout.write(JSON.stringify({
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("chart tooltip structure=%s\nwant %s（groups 应等于数据点数，loose 应为 0）",
 			strings.TrimSpace(string(out)), want)
+	}
+}
+
+// TestAppJSAliasEditRedrawGuardWiring 别名就地编辑的「编辑态不被打断」接线钉子。
+//
+// 注意：这是**静态断言**（读 app.js 源码找标记），不是行为测试——真实浏览器行为
+// （重绘把 <input> 移出 DOM → blur → 半成品被提交）需要实机验证。它钉住的是三件事：
+// ① 全局编辑态标记 aliasEditing 存在且被 startAliasEdit 置位、被 restore 清除；
+// ② renderAccounts 开头有「编辑中直接返回」的守卫（否则 5 秒轮询重绘会打断编辑）；
+// ③ commit 里有 input.isConnected 守卫（元素已被移出文档时放弃提交半成品）。
+func TestAppJSAliasEditRedrawGuardWiring(t *testing.T) {
+	raw, err := os.ReadFile("app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(raw)
+	for _, want := range []struct{ frag, why string }{
+		{"let aliasEditing = false;", "缺少全局编辑态标记"},
+		{"aliasEditing = true; // 进入编辑态", "startAliasEdit 未置位编辑态"},
+		{"aliasEditCell = cell;", "startAliasEdit 未登记当前编辑单元格"},
+		{"cell.dataset.editing = '';", "restore 未清 cell 的 editing 标记"},
+		{"if (aliasEditCell === cell) { aliasEditing = false; aliasEditCell = null; }", "restore 未清除编辑态（编辑结束后重绘仍被跳过；且只有当前编辑者能清）"},
+		{"if (aliasEditing) return;", "renderAccounts 缺少编辑态跳过守卫"},
+		{"if (!input.isConnected) { restore(); return; }", "commit 缺少 isConnected 守卫（元素已移除时会提交半成品）"},
+	} {
+		if !strings.Contains(js, want.frag) {
+			t.Errorf("app.js 缺少 %q（%s）", want.frag, want.why)
+		}
+	}
+}
+
+// TestAppJSAcctNamePriority 账号显示名统一口径 acctName 的行为测试（node 真跑）：
+// 别名 → 上游昵称 → 调用方兜底（缺省 uid8）；空别名不遮住昵称；别名优先于兜底。
+func TestAppJSAcctNamePriority(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; acctName test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function acctName');
+const end = src.indexOf('\n}', start) + 2;
+if (start < 0 || end < 1) throw new Error('acctName not found');
+const ctx = { String };
+vm.createContext(ctx);
+// aliasByUID 是 acctName 的外层依赖：这里用桩注入（含一个空别名，验证不遮昵称）。
+vm.runInContext('var aliasByUID = {"u1":"别名1","u7":""};\n' + src.slice(start, end) +
+  '\nthis.acctName = acctName;', ctx);
+const c = ctx.acctName;
+process.stdout.write(JSON.stringify({
+  aliasWins: c('u1', '昵称1', 'fb'),
+  emptyAliasFallsThrough: c('u7', '昵称7', 'fb'),
+  nickWins: c('u2', '昵称2', 'fb'),
+  fallback: c('u3', '', '未命名账号'),
+  defaultUid8: c('abcdefghijkl', ''),
+  noUid: c('', '昵称9'),
+  emptyAliasNoNick: c('u7', '', ''),
+  nullUid: c(null, null, '—'),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "acctname-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("acctName node test failed: %v\n%s", err, out)
+	}
+	const want = `{"aliasWins":"别名1","emptyAliasFallsThrough":"昵称7","nickWins":"昵称2",` +
+		`"fallback":"未命名账号","defaultUid8":"abcdefgh","noUid":"昵称9",` +
+		`"emptyAliasNoNick":"","nullUid":"—"}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("acctName=%s\nwant %s", strings.TrimSpace(string(out)), want)
+	}
+}
+
+// TestAppJSAliasEditStateMachine 别名编辑状态机的行为测试（node 真跑抽取出的
+// aliasWidth + startAliasEdit，配一套最小 DOM 桩）。它钉住的是**代码侧**的判定逻辑：
+//   - 进入编辑 → 全局编辑态为 true（renderAccounts 的跳过守卫读的就是它）；
+//   - 输入框已被移出文档（isConnected=false）时的 blur → **不提交**（放弃半成品）；
+//   - 回车提交 → 调 /alias 且 body 为裁剪后的值，随后刷新一次；
+//   - Esc → 不提交、清编辑态、刷新一次；
+//   - 全空白 → 不提交 + 错误 toast；
+//   - 点开另一行的输入框时，旧输入框失焦提交后**新输入框仍受守卫保护**。
+//
+// 仍未覆盖的（需实机验证）：浏览器「元素被移出 DOM 会自动触发 blur」这一原生行为本身——
+// 桩里 blur 是手工触发的，故这条测试不能替代真机复现。
+func TestAppJSAliasEditStateMachine(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; alias edit state machine test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const s0 = src.indexOf('const MAX_ALIAS_WIDTH = 32;');
+const s1 = src.indexOf("$('accBody')", s0);
+if (s0 < 0 || s1 < 0) throw new Error('alias edit block not found');
+const calls = { api: [], toast: [], refresh: 0 };
+const made = [];
+const mkInput = () => {
+  const h = {};
+  const el = { isConnected: true, handlers: h, value: '', focus() {}, select() {},
+    addEventListener(t, fn) { h[t] = fn; } };
+  made.push(el);
+  return el;
+};
+const mkCell = (uid) => {
+  const cell = { dataset: { u: uid, alias: '', editing: '' }, textContent: '', child: null,
+    appendChild(el) { this.child = el; } };
+  let html = '<div class="nm">prev</div>';
+  // 真 DOM 语义：重写 innerHTML 会移除全部子节点——桩必须照做，否则「恢复后输入框还在」
+  // 这类断言会假通过。
+  Object.defineProperty(cell, 'innerHTML', {
+    get() { return html; },
+    set(v) { html = v; cell.child = null; },
+  });
+  return cell;
+};
+const fire = (el, type, ev) => { const fn = el.handlers[type]; if (fn) fn(ev || {}); };
+const ctx = {
+  document: { createElement: () => mkInput() },
+  api: (p, o) => { calls.api.push({ p: p, body: o && o.body }); return Promise.resolve({ ok: true }); },
+  toast: (m, c) => calls.toast.push((c || '') + ':' + m),
+  loadOverview: () => { calls.refresh++; },
+  Promise, JSON, String, Number, RegExp, Math,
+};
+vm.createContext(ctx);
+vm.runInContext('var aliasEditing = false, aliasEditCell = null;\n' + src.slice(s0, s1) +
+  '\nthis.startAliasEdit = startAliasEdit; this.isEditing = () => aliasEditing;', ctx);
+const tick = () => new Promise(r => setTimeout(r, 0));
+(async () => {
+  const out = {};
+  // 1) 进入编辑 → 守卫标记为 true
+  const c1 = mkCell('u1');
+  ctx.startAliasEdit(c1);
+  out.editingDuringEdit = ctx.isEditing();
+  // 2) 外部重绘把输入框移出文档后 blur → 放弃提交
+  const i1 = made[made.length - 1];
+  i1.isConnected = false;
+  fire(i1, 'blur');
+  out.apiAfterAbandon = calls.api.length;
+  out.editingAfterAbandon = ctx.isEditing();
+  out.cellRestored = c1.child === null && c1.dataset.editing === '';
+  // 3) 回车提交（值带空白，应裁剪）
+  const c2 = mkCell('u1');
+  ctx.startAliasEdit(c2);
+  const i2 = made[made.length - 1];
+  i2.value = ' 猫猫 ';
+  fire(i2, 'keydown', { key: 'Enter', preventDefault() {} });
+  await tick();
+  out.saved = calls.api.map(x => ({ p: x.p, body: x.body })); // 快照：后续场景会继续 push
+  out.editingAfterSave = ctx.isEditing();
+  out.refreshAfterSave = calls.refresh;
+  // 4) Esc 取消 → 不提交、清编辑态、刷新
+  const c3 = mkCell('u2');
+  ctx.startAliasEdit(c3);
+  fire(made[made.length - 1], 'keydown', { key: 'Escape', preventDefault() {} });
+  out.apiAfterEsc = calls.api.length;
+  out.editingAfterEsc = ctx.isEditing();
+  out.refreshAfterEsc = calls.refresh;
+  // 5) 全空白 → 拒绝
+  const c4 = mkCell('u3');
+  ctx.startAliasEdit(c4);
+  const i4 = made[made.length - 1];
+  i4.value = '   ';
+  fire(i4, 'keydown', { key: 'Enter', preventDefault() {} });
+  await tick();
+  out.apiAfterBlank = calls.api.length;
+  out.blankToast = calls.toast[calls.toast.length - 1];
+  // 6) 点开另一行：旧输入框失焦提交后，新输入框仍受守卫保护
+  const cA = mkCell('u4');
+  ctx.startAliasEdit(cA);
+  made[made.length - 1].value = 'A';
+  const cB = mkCell('u5');
+  ctx.startAliasEdit(cB);
+  fire(made[made.length - 2], 'blur');
+  await tick();
+  out.apiAfterOldBlur = calls.api.length;
+  out.editingStillTrueForNewCell = ctx.isEditing();
+  process.stdout.write(JSON.stringify(out));
+})();`
+	f, err := os.CreateTemp(t.TempDir(), "aliasedit-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("alias edit state machine node test failed: %v\n%s", err, out)
+	}
+	const want = `{"editingDuringEdit":true,"apiAfterAbandon":0,"editingAfterAbandon":false,` +
+		`"cellRestored":true,"saved":[{"p":"accounts/u1/alias","body":"{\"alias\":\"猫猫\"}"}],` +
+		`"editingAfterSave":false,"refreshAfterSave":1,"apiAfterEsc":1,"editingAfterEsc":false,` +
+		`"refreshAfterEsc":2,"apiAfterBlank":1,"blankToast":"err:别名不能全为空白",` +
+		`"apiAfterOldBlur":2,"editingStillTrueForNewCell":true}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("alias edit state machine=%s\nwant %s", strings.TrimSpace(string(out)), want)
 	}
 }
