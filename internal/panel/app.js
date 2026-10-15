@@ -421,9 +421,12 @@ function renderAccounts(list) {
     const latency = formatLatency(tu.last_latency_ms);
     const rate = formatRate(tu.last_tokens_per_second);
     const usageTitle = '最近一次：' + req + ' 次 / ' + totalTok + ' / 延迟 ' + latency + ' / ' + rate;
+    // 展示名优先级：本地别名 → 上游昵称 → 未命名；别名与昵称并存时把昵称放进悬停提示。
+    const alias = s.alias || '';
+    const nmTitle = '点击设置别名' + (alias && s.nickname ? '（上游昵称：' + s.nickname + '）' : '');
     return '<tr class="' + cls + '" title="uid: ' + esc(s.uid) + '">' +
       '<td class="mark" aria-hidden="true"><i></i></td>' +
-      '<td class="who"><div class="nm">' + (s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + (s.enterprise ? ' <span class="realm-tag">企业版</span>' : '') + '</div><div class="id">' + esc(short) + '</div></td>' +
+      '<td class="who"><div class="nm editable" data-edit="alias" data-u="' + esc(s.uid) + '" data-alias="' + esc(alias) + '" title="' + esc(nmTitle) + '">' + (alias || s.nickname ? esc(alias || s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + (s.enterprise ? ' <span class="realm-tag">企业版</span>' : '') + '</div><div class="id">' + esc(short) + '</div></td>' +
       '<td>' + tag + note + rateLimits + '</td>' +
       '<td class="cred" title="' + esc(credTip) + '"><div class="n">' + cred + '</div><div class="bar"><i style="width:' + pct + '%"></i></div></td>' +
       '<td class="num">' + (s.success_count || 0) + ' <span style="color:var(--ink-3)">/</span> <span style="color:var(--bad)">' + (s.err_total || 0) + '</span></td>' +
@@ -519,6 +522,71 @@ async function loadOverview(quiet) {
     if ($('expBox') && !lastPackages) renderExpirySnapshot(d);
   } catch (e) { if (!quiet) toast(e.message, 'err'); }
 }
+
+/* ── 账号别名：点名字就地编辑 ───────────────────────────────────────
+   点账号名 → 原地变输入框：回车 / 失焦保存，Esc 取消。别名只落本地 auths 文件的
+   account.alias，与上游同步的 nickname 并存（上游刷新只更新 nickname，不动别名）。
+   展示优先级 alias → nickname → 未命名，故空别名 = 清除 = 回落昵称。 */
+const MAX_ALIAS_WIDTH = 32;
+
+// aliasWidth 别名的显示宽度（CJK / 全角 / emoji 计 2 列），与后端 logfmt.DisplayWidth
+// 同一口径：用字符数校验会让 32 个汉字（显示 64 列）绕过限制、把账号列撑变形。
+function aliasWidth(s) {
+  let w = 0;
+  for (const ch of s) {
+    if (/[\u1100-\u115f\u2329\u232a\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe6f\uff00-\uff60\uffe0-\uffe6]/.test(ch)) w += 2;
+    else if (/[\u{1f300}-\u{1f9ff}\u{20000}-\u{3fffd}]/u.test(ch)) w += 2;
+    else w += 1;
+  }
+  return w;
+}
+
+function startAliasEdit(cell) {
+  if (cell.dataset.editing === '1') return;
+  const uid = cell.dataset.u;
+  const prev = cell.innerHTML;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'alias-input';
+  input.value = cell.dataset.alias || '';
+  input.placeholder = '别名（留空 = 用昵称）';
+  input.maxLength = 64; // 显示宽度上限由 aliasWidth 校验，这里只挡异常长的粘贴
+  cell.dataset.editing = '1';
+  cell.textContent = '';
+  cell.appendChild(input);
+  input.focus();
+  input.select();
+  let settled = false;
+  const restore = () => { cell.innerHTML = prev; cell.dataset.editing = ''; };
+  const commit = async () => {
+    if (settled) return;
+    settled = true;
+    const raw = input.value;
+    const val = raw.trim();
+    if (raw !== '' && val === '') { restore(); toast('别名不能全为空白', 'err'); return; }
+    if (aliasWidth(val) > MAX_ALIAS_WIDTH) {
+      restore();
+      toast('别名过长：上限 ' + MAX_ALIAS_WIDTH + ' 显示宽度（中文按 2 计）', 'err');
+      return;
+    }
+    restore();
+    try {
+      await api('accounts/' + encodeURIComponent(uid) + '/alias', { method: 'POST', body: JSON.stringify({ alias: val }) });
+      toast(val ? '别名已保存' : '别名已清除（回落上游昵称）', 'ok');
+      loadOverview(true);
+    } catch (e) { toast(e.message, 'err'); }
+  };
+  input.addEventListener('keydown', ev => {
+    if (ev.key === 'Enter') { ev.preventDefault(); commit(); }
+    else if (ev.key === 'Escape') { ev.preventDefault(); settled = true; restore(); }
+  });
+  input.addEventListener('blur', () => { commit(); });
+}
+
+$('accBody').addEventListener('click', ev => {
+  const cell = ev.target.closest('[data-edit="alias"]');
+  if (cell) startAliasEdit(cell);
+});
 
 $('accBody').addEventListener('click', async ev => {
   const b = ev.target.closest('button[data-a]');

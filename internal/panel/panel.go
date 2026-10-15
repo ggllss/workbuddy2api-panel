@@ -12,6 +12,8 @@ package panel
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -24,6 +26,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
@@ -160,6 +163,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/import/cockpit", p.withAuth(p.importCockpit))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/revive", p.withAuth(p.accountRevive))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/disable", p.withAuth(p.accountDisable))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/alias", p.withAuth(p.accountAlias))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/pause", p.withAuth(p.accountPause))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/resume", p.withAuth(p.accountResume))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/checkin", p.withAuth(p.accountCheckin))
@@ -479,6 +483,48 @@ func (p *Panel) accountDisable(w http.ResponseWriter, r *http.Request) {
 	}
 	p.cfg.Pool.Disable(uid, "manual disable (panel)")
 	log.Printf("panel: disable uid=%s（人工禁用）", uid)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// maxAliasWidth 别名显示宽度上限（CJK / 全角 / emoji 计 2 列，与日志表格同一口径）。
+const maxAliasWidth = 32
+
+// accountAlias 设置/清除账号本地别名（面板「点账号名就地改名」）。
+// 请求体 {"alias":"..."}：空串 = 清除别名（展示回落上游 nickname）；纯空白 = 400（拒绝
+// 全空白名），前后空白自动裁掉；超过 maxAliasWidth 显示宽度 = 400。未知 uid → 404。
+// 只写本地 auths 文件，不触碰上游 nickname（syncNicknames 照常更新 nickname）。
+func (p *Panel) accountAlias(w http.ResponseWriter, r *http.Request) {
+	uid := r.PathValue("uid")
+	if _, ok := p.cfg.Pool.Status(uid); !ok {
+		writeErr(w, http.StatusNotFound, "account not found")
+		return
+	}
+	var body struct {
+		Alias string `json:"alias"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<12)).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	alias := strings.TrimSpace(body.Alias)
+	if body.Alias != "" && alias == "" {
+		writeErr(w, http.StatusBadRequest, "alias must not be blank")
+		return
+	}
+	if logfmt.DisplayWidth(alias) > maxAliasWidth {
+		writeErr(w, http.StatusBadRequest,
+			fmt.Sprintf("alias too long: max %d display width (CJK counts 2)", maxAliasWidth))
+		return
+	}
+	if !p.cfg.Pool.SetAlias(uid, alias) {
+		writeErr(w, http.StatusInternalServerError, "alias save failed")
+		return
+	}
+	if alias == "" {
+		log.Printf("panel: alias cleared uid=%s（回落上游 nickname）", uid)
+	} else {
+		log.Printf("panel: alias set uid=%s alias=%q", uid, alias)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

@@ -235,6 +235,11 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 #taskTable .who { max-width: 360px; }
 #taskTable .who .nm, #taskTable .who .id { white-space: normal; word-break: break-all; }
 .who .nm { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 别名就地编辑：名字可点（悬停提示），点后原地变输入框。 */
+.who .nm.editable { cursor: pointer; border-radius: 4px; }
+.who .nm.editable:hover { background: var(--accent-soft); box-shadow: 0 0 0 3px var(--accent-soft); }
+/* 就地编辑输入框：紧凑内联，颜色沿用全局 input 规则（--ink / --surface-2）。 */
+.alias-input { width: 100%; min-width: 96px; box-sizing: border-box; font-weight: 550; padding: 1px 5px; border-radius: 4px; border-color: var(--accent); }
 .who .id { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .realm-tag { display: inline-block; margin-left: 6px; padding: 1px 5px; border-radius: 4px; font: 500 10px/1 var(--sans); color: var(--accent); background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent); vertical-align: 1px; }
 .realm-row { display: flex; align-items: center; gap: 14px; padding: 4px 0 10px; }

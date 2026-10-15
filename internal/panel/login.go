@@ -154,6 +154,39 @@ func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "url": st.AuthURL, "state": st.State, "realm": realm})
 }
 
+// loginToken / loginAccount 登录轮询从上游拿到的凭证与账号信息（落盘 Auth 的原料）。
+type loginToken struct {
+	AccessToken  string `json:"accessToken"`
+	RefreshToken string `json:"refreshToken"`
+	ExpiresIn    int64  `json:"expiresIn"`
+	Domain       string `json:"domain"`
+}
+
+type loginAccount struct {
+	UID          string `json:"uid"`
+	EnterpriseID string `json:"enterpriseId"`
+	Nickname     string `json:"nickname"`
+}
+
+// newLoginAuth 用本次登录结果组装待落盘的 Auth，并**继承同 uid 既有文件里的本地别名**：
+// session 失效后重新添加账号是本面板的常规操作，别名是只属于本地的字段，不该被凭证重写
+// 抹掉。只继承别名——accessToken/refreshToken/expiresAt/realm/enterpriseId/nickname 一律
+// 以本次登录为准。
+func (p *Panel) newLoginAuth(tok loginToken, acct loginAccount) *auth.Auth {
+	a := &auth.Auth{
+		AccessToken:  tok.AccessToken,
+		RefreshToken: tok.RefreshToken,
+		ExpiresAt:    time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second).Unix(),
+		Domain:       tok.Domain,
+		UID:          acct.UID,
+		EnterpriseID: acct.EnterpriseID,
+		Nickname:     acct.Nickname,
+		FilePath:     filepath.Join(p.cfg.AuthDir, fmt.Sprintf("workbuddy-%s.json", acct.UID)),
+	}
+	a.Alias = auth.LocalAliasFromFile(a.FilePath)
+	return a
+}
+
 // loginPoll 轮询登录态。未完成 → {done:false}；完成 → 建凭证、落盘、热加载、签到。
 func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	state := r.URL.Query().Get("state")
@@ -177,23 +210,14 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"done": false, "message": err.Error()})
 		return
 	}
-	var tok struct {
-		AccessToken  string `json:"accessToken"`
-		RefreshToken string `json:"refreshToken"`
-		ExpiresIn    int64  `json:"expiresIn"`
-		Domain       string `json:"domain"`
-	}
+	var tok loginToken
 	if err := json.Unmarshal(tokRaw, &tok); err != nil || tok.AccessToken == "" {
 		writeJSON(w, http.StatusOK, map[string]any{"done": false, "message": "waiting for login"})
 		return
 	}
 
 	// 完成：取 uid/nickname（失败不阻塞，仅缺展示名）。
-	var acct struct {
-		UID          string `json:"uid"`
-		EnterpriseID string `json:"enterpriseId"`
-		Nickname     string `json:"nickname"`
-	}
+	var acct loginAccount
 	if acctRaw, _, err := doJSON(http.MethodGet, epAcct+state, tok.AccessToken, nil, origin); err == nil {
 		_ = json.Unmarshal(acctRaw, &acct)
 	}
@@ -214,16 +238,7 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "mkdir auth dir: "+err.Error())
 		return
 	}
-	a := &auth.Auth{
-		AccessToken:  tok.AccessToken,
-		RefreshToken: tok.RefreshToken,
-		ExpiresAt:    time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second).Unix(),
-		Domain:       tok.Domain,
-		UID:          acct.UID,
-		EnterpriseID: acct.EnterpriseID,
-		Nickname:     acct.Nickname,
-		FilePath:     filepath.Join(p.cfg.AuthDir, fmt.Sprintf("workbuddy-%s.json", acct.UID)),
-	}
+	a := p.newLoginAuth(tok, acct)
 	// global 登录：落盘 auth.realm=global（Realm() 按此判域；不写则依赖 domain 后缀回落）。
 	if sess.realm == "global" {
 		if _, err := auth.BackfillRealmFor(a, "global"); err != nil {

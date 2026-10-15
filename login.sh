@@ -153,6 +153,29 @@ auth = {
         "domain": os.environ["WB2A_LOGIN_DOMAIN"],
     },
 }
+# 同一 uid 重登（覆盖既有文件）时继承旧文件里的**本地别名**：别名只属于本地（上游同步永不
+# 写它），不该被凭证重写抹掉。只继承 account.alias（兼容扁平形顶层 alias），其余字段一律
+# 以本次登录为准。
+#
+# 继承是尽力而为：新账号（无文件）/ 读取失败 / JSON 损坏 / **JSON 合法但类型不对**都必须
+# 静默跳过并继续落盘——本脚本是 set -euo pipefail，这里漏出的任何异常都会中断整个 login.sh，
+# 让新凭证根本写不进去（异常发生在 json.dump 之前）。故类型逐层 isinstance 校验 + 兜底
+# except Exception：宁可丢别名，绝不能让重登失败。
+try:
+    with open(os.environ["WB2A_LOGIN_AUTH_FILE"]) as f:
+        old = json.load(f)
+    alias = ""
+    if isinstance(old, dict):
+        acct = old.get("account")
+        if isinstance(acct, dict):
+            alias = acct.get("alias") or ""
+        if not alias:
+            alias = old.get("alias") or ""
+    # 非字符串别名（如 "alias": 123）不继承：写进去会让 Go 侧 Parse 整份文件解析失败。
+    if isinstance(alias, str) and alias:
+        auth["account"]["alias"] = alias
+except Exception:
+    pass
 with open(os.environ["WB2A_LOGIN_AUTH_FILE"], "w") as f:
     json.dump(auth, f, indent=1)
 print(f"已保存（{os.environ['WB2A_LOGIN_ACTION']}）: {os.environ['WB2A_LOGIN_AUTH_FILE']}")
