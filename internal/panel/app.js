@@ -1151,6 +1151,13 @@ const CFG_MAP = {
   session_sticky_enabled: ['session_sticky', 'enabled'],
   request_client_info: ['logging', 'request_client_info'],
   auto_candidates: ['auto', 'candidates'],
+  peak_input_cache_hit: ['cost', 'peak_input_cache_hit'],
+  peak_input_cache_miss: ['cost', 'peak_input_cache_miss'],
+  peak_output: ['cost', 'peak_output'],
+  offpeak_input_cache_hit: ['cost', 'offpeak_input_cache_hit'],
+  offpeak_input_cache_miss: ['cost', 'offpeak_input_cache_miss'],
+  offpeak_output: ['cost', 'offpeak_output'],
+  extra_offpeak_dates: ['cost', 'extra_offpeak_dates'],
 };
 /* 「覆盖型」文本字段：空串本身是有意义的取值（= 回落到内置默认），必须照发。
  *
@@ -1212,6 +1219,11 @@ function collectConfig() {
         v = raw === '' ? [] : raw.split(/[,，\s]+/).filter(Boolean);
       }
       else if (raw === '') v = CLEARABLE_CFG.has(name) ? '' : undefined;
+      else if (name === 'extra_offpeak_dates') {
+        // 日期数组：逗号/空白分隔 → 字符串数组。与 _hours 分开处理是因为这些
+        // 元素是 "YYYY-MM-DD" 字符串，不能走 Number（会变 NaN 存成 JSON null）。
+        v = raw.split(/[,，\s]+/).filter(Boolean);
+      }
       else if (name.endsWith('_hours')) v = raw.split(/[,，\s]+/).filter(Boolean).map(Number);
       else v = raw;
     }
@@ -2103,8 +2115,9 @@ function usStat(v, k, cls) {
 
 /* usKpi 用量页的指标卡。比账号池的 .stat 多两样：语义色轨（cls）与副标题（sub，
    放"占比 / 均速率"这类解释性数字）；bar 是卡片内的构成条 HTML，只有需要时才传。 */
-function usKpi(v, k, cls, sub, bar) {
-  return '<div class="kpi ' + (cls || '') + '">' +
+function usKpi(v, k, cls, sub, bar, title) {
+  return '<div class="kpi ' + (cls || '') + '"' +
+    (title ? ' title="' + esc(title) + '"' : '') + '>' +
     '<div class="k">' + esc(k) + '</div>' +
     '<div class="v">' + esc(v) + '</div>' +
     (bar || '') +
@@ -2290,9 +2303,29 @@ function renderUsage(d) {
   const okRate = reqs ? (reqs - errs) / reqs * 100 : null;
   // 构成条要的是合法 CSS 宽度，usPct 在无样本时返回 "—"，不能直接拼进 style。
   const pctW = (part) => total ? Math.max(0, Math.min(100, Number(part || 0) / total * 100)).toFixed(2) + '%' : '0%';
-  // 六张卡：主指标用强调色，completion 用成功色（与图表里的绿柱呼应），
+  // 七张卡：主指标用强调色，completion 用成功色（与图表里的绿柱呼应），
   // 失败/延迟只在有值时上语义色——全绿全黄的仪表盘等于没有重点。
+  // 首卡是「今日金额」：它的口径与上面这些**统计窗口**无关（金额恒按当天
+  // 服务器本地日历日算，数据来自同一份 /panel/api/usage 响应的 today_cost，
+  // 不额外请求），副标题写峰/谷拆分，悬停给完整单价表，避免被读成
+  // "跟着 hours 变"或"按当前窗口折算"。
+  const tc = usageData.today_cost || {};
+  const tcb = tc.breakdown || {};
+  const tct = tc.tokens || {};
+  const tcp = tc.pricing || {};
+  const cny = v => Number(v || 0).toFixed(2);
+  const costSub = '高峰 ¥' + cny(tcb.peak_amount) + ' · 空闲 ¥' + cny(tcb.offpeak_amount) +
+    ' · 缓存命中 ' + fmtTok(tct.cache_hit) + ' / 未命中 ' + fmtTok(tct.cache_miss) + ' tok';
+  const costTitle = (tc.note || '当天全部模型按 DeepSeek V4.1 Flash 官方价折算（空闲/高峰分时段计价）') +
+    '。高峰（北京时间工作日 09:00–12:00、14:00–18:00）每百万 token：' +
+    '命中 ¥' + cny(tcp.peak_input_cache_hit) + ' / 未命中 ¥' + cny(tcp.peak_input_cache_miss) +
+    ' / 输出 ¥' + cny(tcp.peak_output) + '；空闲每百万 token：' +
+    '命中 ¥' + cny(tcp.offpeak_input_cache_hit) + ' / 未命中 ¥' + cny(tcp.offpeak_input_cache_miss) +
+    ' / 输出 ¥' + cny(tcp.offpeak_output) + '。' +
+    '统计日 ' + (tc.date || '—') + '（' + (tc.timezone || '—') + '），与上方统计窗口无关。';
+
   $('usStats').innerHTML =
+    usKpi('¥' + cny(tc.amount), '今日金额', 'c-accent', costSub, null, costTitle) +
     usKpi(fmtTok(reqs), '请求数', 'c-accent',
       errs ? '其中失败 ' + errs + ' 次' : '全部成功') +
     usKpi(fmtTok(total), '总 token', 'c-accent',

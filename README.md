@@ -410,6 +410,10 @@ curl -sN http://localhost:7863/v1/chat/completions \
 | `session_sticky.ttl` | `30m` | 会话绑定 TTL（滚动续期） |
 | `session_sticky.gc_interval` | `5m` | 过期绑定 GC 周期 |
 | `auto.candidates` | `[]` | **全量 auto（`auto:all`）候选模型有序列表**，元素为完整 `realm:model` 形态（如 `"global:deepseek-v4.1-flash"`），**顺序即优先级**。请求 `model=auto:all` 时按序逐个尝试，只有当前候选「选不出任何可用账号 / 该模型在所有账号上都被锁」才降级到下一个；每个候选享有独立的 `MaxRotate` 账号轮转预算。候选跑完后按耗尽类型分流：模型级全池锁定 → 400 `model_unavailable`「所有候选模型均不可用」，纯账号级耗尽 → 503 `no_healthy_account`（可重试）。空数组 = 功能关闭（`auto:all` 返回 400，且不出现在 `/v1/models`）。去空、去重（保留首次出现顺序）；非 `cn:` / `global:` 前缀的项**启动报错**（不猜域，详见「核心行为语义 → 全量 auto 跨模型降级」）。改动即时生效，无需重启 |
+| `cost.peak_input_cache_hit` / `peak_input_cache_miss` / `peak_output` | `0.04` / `2` / `8` | **当日花费折算单价·高峰时段**（元 / 百万 tokens）：输入·缓存命中 / 输入·缓存未命中 / 输出。缺省即 DeepSeek V4.1 Flash 官方价，供面板「今日金额」与 `GET /api/cost/today` 使用。负值保存报错（不静默钳 0，避免金额永久显示 ¥0.00）。改动即时生效 |
+| `cost.offpeak_input_cache_hit` / `offpeak_input_cache_miss` / `offpeak_output` | `0.02` / `1` / `4` | **当日花费折算单价·空闲时段**（元 / 百万 tokens），三档同上。官方当前空闲价 = 高峰价的一半，但代码不写死这个比例（官方改成别的比例时不会算错） |
+| `cost.extra_offpeak_dates` | `[]` | **额外按空闲价计的日期**（`"YYYY-MM-DD"`，北京时间日历日），用于法定节假日 / 调休：命中的日期**全天**按空闲价，优先于星期判断。格式非法保存报错。本程序**不内置节假日表**（见下） |
+| `cost` 计价规则 | — | **逐小时桶判峰谷**：小时起点落在北京时间（服务器 `TZ=Asia/Shanghai`）**周一至周五 `[09:00,12:00)` 或 `[14:00,18:00)`**（左闭右开——12:00、18:00 整点起即空闲）为高峰，其余时段（含周末全天）为空闲。范围是**当天全部模型**统一折算，不做模型过滤。金额 = Σ(各小时 命中×命中价 + 未命中×未命中价 + 输出×输出价) / 1,000,000，四舍五入保留两位小数 |
 
 ### 上游超时语义（三段各归其位）
 
@@ -661,11 +665,11 @@ http://127.0.0.1:7863/panel/
 | 视图 | 功能 |
 |---|---|
 | **账号池** | 统计条（账号总数 / 可用 / 冷却中 / 已禁用 / 积分剩余·总额 / 粘性会话）+ 账号表：健康色条与状态标签（可用 / 限流冷却 / 积分冷却 / 熔断 / 连败降权 / 已禁用）、积分量条、成功·失败计数、在途、最近一次用量（次数 / token / 延迟 / 速率）、最近成功时间；**点账号名可就地改自定义别名**（回车 / 失焦保存，Esc 取消，见「账号别名」）；单号操作 签到 / 余额 / 任务 / 解冻 / 禁用 / 移除；批量「全部签到」「旅行巡检」「活跃上报」「全部保活」；下方**模型锁池**表列出被上游按模型限流的模型（整池不可用 / 没号可用 / 部分限流）、可选与总数、锁定账号数、最早解锁与全池解锁倒计时、限流原因，无锁定时显示「所有模型均可选」 |
-| **用量** | 指标卡（请求数 / 总 token / prompt / completion / 失败尝试 / 平均延迟，含占比与吐字速率）+ **Token 时序图**（渐变堆叠柱、均值参考线、峰值标注、悬停看单桶明细）+ **用量明细**（按账号 / 按模型 / 按域切换，可按合计 Token / 请求数 / 失败数 / 平均延迟排序，含 prompt·completion 占比条）+ **积分扣除历史**（按账号 / 按模型，折算「积分 / 1M Token」） |
+| **用量** | 指标卡（**今日金额 ¥X.XX** / 请求数 / 总 token / prompt / completion / 失败尝试 / 平均延迟，含占比与吐字速率；今日金额恒按当天本地日历日、按 DeepSeek V4.1 Flash 官方价分时段折算，悬停可看完整单价表）+ **Token 时序图**（渐变堆叠柱、均值参考线、峰值标注、悬停看单桶明细）+ **用量明细**（按账号 / 按模型 / 按域切换，可按合计 Token / 请求数 / 失败数 / 平均延迟排序，含 prompt·completion 占比条）+ **积分扣除历史**（按账号 / 按模型，折算「积分 / 1M Token」） |
 | **积分构成** | **积分到期分布**（按批次到期日聚合，颜色区分账号）+ **账号对比**（按来源归并的面额 / 余额 / 包数卡片与混合构成条）+ 逐包明细（按到期日排序，默认展开最近到期的 `panel.package_detail_limit` 个，其余与已用完的包折叠） |
 | **任务中心** | 成长任务队列：一键扫描全部账号待办 → 按账号排队执行（账号内串行，账号间可选并发 1-3），进度实时更新；另含开学季券码查询。详见 [任务中心](#-任务中心面板新视图) |
 | **模型与档位** | 实时查询上游：每模型的积分倍率（含限时免费 / 夜间折扣等**生效价**与划线牌价）、默认思考档、支持的档位（含「off（可关）」）、上下文长度与最大输出；存在探测数据时最大输出列显示**实测上限与钳制告警**（见「探测模型真实输出上限」）。支持**按条件查询**：关键词（ID / 名称 / 描述 / 厂商 / 标签，空格分词 AND）、域（CN / Global）、能力（工具 / 视觉 / 思考 / 默认）、思考档位、价格（折扣 / 限时免费 / 打折），以及按倍率 / 上下文 / 最大输出 / ID 排序 |
-| **配置** | 在线编辑 config.json：服务（监听地址 / API 密钥 / 单账号明细条数）、定时任务（签到 / 保活 / 旅行 / 活跃 / 成长任务五类时点与开关 + 余额刷新间隔）、账号池与流量治理、**全量 auto 候选模型**（从上游真实模型清单勾选，上移/下移排序，保存即热生效）、上游与高级（超时 / 出站 UA / 提示词模式 / 指纹脱敏 / 粘性路由）、日志（调用来源记录开关） |
+| **配置** | 在线编辑 config.json：服务（监听地址 / API 密钥 / 单账号明细条数）、定时任务（签到 / 保活 / 旅行 / 活跃 / 成长任务五类时点与开关 + 余额刷新间隔）、账号池与流量治理、**当日花费折算单价**（六档价格 + 额外按空闲计价的节假日日期，改完即热生效）、**全量 auto 候选模型**（从上游真实模型清单勾选，上移/下移排序，保存即热生效）、上游与高级（超时 / 出站 UA / 提示词模式 / 指纹脱敏 / 粘性路由）、日志（调用来源记录开关） |
 | **运行日志** | **请求记录表**（时间 / 结果 / 模型 / 账号 / **来源 IP** / **User-Agent** / 耗时 / Token / 积分 / 请求 ID），支持按 IP·UA·模型·账号·请求 ID 与结果筛选、读取条数、时间范围；下方 **运行日志** 按「任务 / 对话 / 系统」分频道，可开关自动滚动 |
 
 顶部另有「刷新」（向上游全量查询真实余额并回写；5 秒自动轮询只读内存，不打上游）与「添加账号」（浏览器内完成 OAuth 设备授权：显示授权链接 + 自动轮询，登录后凭证落盘并**热加载进池，免重启**，也支持导入 cockpit tools 导出的 JSON）。
@@ -687,6 +691,7 @@ http://127.0.0.1:7863/panel/
 
 **配置热生效**：保存配置后，`api_key`、`cooldown.soft_rate`、`features.sanitize_blacklist_fingerprints`、
 `logging.request_client_info`、`pool.*`（熔断/在途/权重）、`auto.candidates`（全量 auto 候选列表）、
+`cost.*`（当日花费单价与节假日日期，面板与 `/api/cost/today` 同时生效）、
 `schedule.*`（时点/开关/余额刷新间隔）**立即生效，无需重启**；
 涉及进程装配期依赖的字段（`listen`、`auth_dir`、`state_file`、`upstream.*`、`upstash.*`、`session_sticky.ttl`）
 保存后会提示"需重启进程生效"。配置写入采用「深合并且原子替换」：只更新面板表单覆盖的键，
@@ -710,7 +715,7 @@ http://127.0.0.1:7863/panel/
 
 | 分组 | 端点 |
 |---|---|
-| 只读 | `GET overview` · `GET usage`（`hours` 或 `from`/`to`）· `GET packages` · `GET models` · `GET model_probes` · `GET logs` · `GET request_metrics` · `GET request_logs`（`limit` / `outcome` / `account` / `model` / `client_ip` / `user_agent` / `from` / `to`）· `GET config` · `GET tasks/queue` · `GET school/vouchers` |
+| 只读 | `GET overview` · `GET usage`（`hours` 或 `from`/`to`；响应额外带 `today_cost`，即与 `/api/cost/today` 同源的当日花费，面板据此显示「今日金额」而无需再打一次接口）· `GET packages` · `GET models` · `GET model_probes` · `GET logs` · `GET request_metrics` · `GET request_logs`（`limit` / `outcome` / `account` / `model` / `client_ip` / `user_agent` / `from` / `to`）· `GET config` · `GET tasks/queue` · `GET school/vouchers` |
 | 账号运维 | `POST accounts/{uid}/checkin` · `balance` · `revive` · `disable` · `alias`（body `{"alias":"..."}`，空串 = 清除别名，未知 uid → 404）· `remove`；`POST checkin_all` · `travel_all` · `activity_all` · `keepalive_all` · `balance_all` |
 | 任务 | `GET accounts/{uid}/tasks`；`POST accounts/{uid}/tasks/accept` · `accept_all` · `claim` · `auto` · `auto_all`；`POST tasks/scan_all` · `tasks/run_queue` |
 | 添加账号 | `POST login/start` · `GET login/poll` · `GET login/regions` · `POST import/cockpit` |
@@ -732,6 +737,7 @@ http://127.0.0.1:7863/panel/
 | `GET /v1/models` | Bearer（`api_key` 非空时） | 模型列表（纯动态拉取，上游目录缓存 **10min**；失败返回空列表 + 5min 负缓存）；每模型带 `context_length`/`max_output_tokens`（四级查找链：上游目录 → 内置知识表 → model.json 缓存 → models.dev）、`reasoning_supported_efforts`/`reasoning_default_effort` 思考档位及描述/标签/倍率等全字段（上游有返回时）。配置了 `auto.candidates` 时另在末尾附一条网关侧伪模型 `auto:all`（带 `description` 说明由 `auto.candidates` 驱动，详见「核心行为语义 → 全量 auto 跨模型降级」）；该条目**不受目录缓存影响**（每次请求按实时候选构造），候选清空后立即消失 |
 | `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/在途/粘性）+ `model_locks`（按「域 + 模型」聚合的限流视图：可选 / 总数、锁定账号数、`state`、最早解锁与全池解锁时间、限流原因；无锁定为空） |
 | `GET /healthz` | 无 | 健康检查：有 healthy 且未占满账号返回 200，否则 503；响应带身份标识（见下） |
+| `GET /api/cost/today` | **无（免鉴权）** | **当日花费金额**：把当天全部模型的 token 按 DeepSeek V4.1 Flash 官方价（空闲/高峰分时段）折成人民币，两位小数。纯内存聚合、不打上游，供其他程序轮询（见下） |
 
 > 鉴权规则：仅当 `api_key` 非空才校验 `Authorization: Bearer <api_key>`；**`api_key` 为空时上述端点直接放行**；`/healthz` 恒无鉴权。
 
@@ -744,6 +750,56 @@ http://127.0.0.1:7863/panel/
 响应同时带 `X-Service: workbuddy2api` 头。这两个身份标识用于区分**本网关**与同端口上可能残留的其他服务——对方即使返回 2xx 也不会带该字段 / 头，宿主探测据此避免"假成功"。
 
 **宿主健康探测指引**：强校验（推荐）用 `/status` + `api_key`——只有持有正确 `api_key` 的本网关返回 200，其他服务返回 401 / 404；弱校验（不适合持 key 的负载均衡器）用 `/healthz` + `service` 字段判据（`/healthz` 恒无鉴权，`service == "workbuddy2api"` 才算命中本网关）。容器自带 `HEALTHCHECK` 用的就是弱校验（仅进程内自检，够用）。
+
+### 当日花费金额（`GET /api/cost/today`）
+
+把**当天**（服务器本地日历日）全部模型的 token 用量按 **DeepSeek V4.1 Flash** 官方价折成人民币金额，供其他程序直接取数（监控面板、预算告警、计费对账脚本等）。纯内存聚合，**不产生任何上游请求**，可以放心高频轮询（响应带 `Cache-Control: no-store`）。
+
+```bash
+curl -s http://127.0.0.1:7863/api/cost/today
+```
+
+```json
+{
+  "date": "2026-10-23",
+  "timezone": "Asia/Shanghai",
+  "currency": "CNY",
+  "amount": 12.34,
+  "amount_str": "12.34",
+  "tokens": {"prompt": 3000000, "cache_hit": 1000000, "cache_miss": 2000000, "completion": 500000, "total": 3500000},
+  "breakdown": {"peak_amount": 8.04, "offpeak_amount": 5.02},
+  "pricing": {
+    "peak_input_cache_hit": 0.04, "peak_input_cache_miss": 2, "peak_output": 8,
+    "offpeak_input_cache_hit": 0.02, "offpeak_input_cache_miss": 1, "offpeak_output": 4,
+    "unit": "CNY per 1M tokens"
+  },
+  "note": "当天全部模型按 DeepSeek V4.1 Flash 官方价折算（空闲/高峰分时段计价）",
+  "generated_at": "2026-10-23T16:48:22+08:00"
+}
+```
+
+字段口径：
+
+| 字段 | 含义 |
+|---|---|
+| `date` / `timezone` | 统计的日历日与切日所用时区（取进程本地时区，容器 `TZ=Asia/Shanghai` 时即 `Asia/Shanghai`） |
+| `amount` / `amount_str` | 四舍五入到两位小数的金额（`amount_str` 恒为两位小数字符串，无用量时是 `"0.00"` 而非空值） |
+| `tokens` | 当天聚合的 token 明细；`prompt` 是上游报告的输入总量（= 命中 + 未命中） |
+| `breakdown` | 高峰 / 空闲各自的金额拆分（未取整，两者之和即全天原始值） |
+| `pricing` | 本次折算实际使用的单价与单位，便于调用方自行复算 |
+| `generated_at` | 生成本次响应的时间（RFC3339，带本地偏移） |
+
+**计价规则**：三档（输入·缓存命中 / 输入·缓存未命中 / 输出）分高峰、空闲两套单价，**逐小时**判定该小时属于高峰还是空闲后再累加——不是用单一价格算全天（那会让夜间流量按高峰价翻倍虚高）。高峰时段按北京时间 **周一至周五 `[09:00,12:00)`、`[14:00,18:00)`**（左闭右开：12:00、18:00 整点起即为空闲），其余时段（含周末全天）为空闲价。
+
+**节假日**：`cost.extra_offpeak_dates` 里的日期**全天**按空闲价（优先于星期判断）。**本程序不内置法定节假日表**——中国法定节假日与调休每年由国务院公告，内置表必然在次年失效并**静默**把节假日按高峰价算（金额虚高一倍），比不内置更糟。需要时自行维护，例如：
+
+```json
+"cost": {"extra_offpeak_dates": ["2026-10-01", "2026-10-02", "2026-10-03"]}
+```
+
+> ⚠️ **免鉴权风险**：该端点**不校验 `api_key`**（按需求「任何能访问该端口的人都能读」）。泄露的信息是「今天花了多少钱 + 今天的 token 量」——不含凭证、不含账号身份、不含任何请求内容，但它确实暴露了用量规模。**单机 / 私有网络部署可接受**；若网关直接暴露在公网，请自行在反向代理层加访问控制或限流（其他端点仍按 `api_key` 鉴权）。同理，`amount` 是**按公开单价折算的估算值**，不是上游实际扣费，不能用于精确账务对账。
+
+面板侧同一数字显示在「用量」视图首卡「今日金额」（悬停可看完整单价表与统计日期）。
 
 ### 流式行为细节
 

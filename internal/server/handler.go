@@ -67,6 +67,11 @@ type Config struct {
 	// 且与 pool 的每账号累计器同源，两条口径不会漂移。
 	Usage *usage.Recorder
 
+	// Cost 当日花费折算单价（可选；nil = 回落到内置官方价）。
+	// 由 main 注入的 usage.PricingHolder 提供热改能力：面板改价后下一个请求
+	// 即用新价，无需重启。nil-safe，禁止在本包内直接读 config.Config。
+	Cost *usage.PricingHolder
+
 	// RequestLog 请求指标与脱敏 JSONL 归档（可选；nil = 不记录）。
 	RequestLog *reqlog.Recorder
 
@@ -139,6 +144,10 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
+	// 当日花费金额：**免鉴权**（用户明确要求"任何能访问该端口的人都能读"，
+	// 供其他程序直接取数，见 README 的风险提示）。刻意不套 withAuth——套上
+	// 就退化成"要 API key 才能读自己的账单"，与需求相反。
+	h.mux.HandleFunc("GET /api/cost/today", h.costToday)
 	if cfg.Panel != nil {
 		h.mux.Handle("/panel/", cfg.Panel) // /panel → /panel/ 由 ServeMux 自动重定向
 	}
@@ -176,6 +185,24 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+// costToday GET /api/cost/today：当天（服务器本地日历日）全部模型 token 按
+// DeepSeek V4.1 Flash 官方价折算的金额，供外部程序轮询。
+//
+// 免鉴权：字段是"今天花了多少钱 + 今天的 token 量"这类运营数字，不含凭证、
+// 不含账号身份、不含请求内容。代价是任何能连上该端口的人都能读到用量规模，
+// README 里已标注这一取舍（单机/私网部署可接受；公网暴露请自行在反代上加限流
+// 或改用 /status 那样带鉴权的路径）。
+//
+// 计算是纯内存聚合（usage.Recorder 快照 + 逐小时桶累加），**不产生任何上游
+// 请求**，所以高频轮询不会消耗上游额度，也不会干扰选号。
+func (h *Handler) costToday(w http.ResponseWriter, r *http.Request) {
+	res := h.cfg.Usage.CostToday(h.cfg.Cost.Load())
+	// 明确允许缓存 0 秒（每次都是实时值），但禁止中间层把它长期缓存住：
+	// "实时更新"是需求的一部分，被反代缓存 5 分钟就等于不实时。
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {

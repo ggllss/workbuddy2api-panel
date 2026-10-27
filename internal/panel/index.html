@@ -1037,6 +1037,45 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         </div>
 
         <div class="box">
+          <header><h3>当日花费折算单价 <span class="hint">元 / 百万 tokens · 影响面板「今日金额」与 GET /api/cost/today</span></h3></header>
+          <div class="pad">
+            <div class="hint">默认值是 <b>DeepSeek V4.1 Flash</b> 官方价（模型列 <code>deepseek-flash</code>，版本 DeepSeek-V4.1-Flash-1017）。
+              计费口径：当天<b>全部模型</b>的 token 统一按这套单价折算，<b>逐小时</b>判定该小时属于高峰还是空闲再累加——
+              高峰时段按北京时间（服务器 TZ=Asia/Shanghai）的<b>周一至周五 09:00–12:00、14:00–18:00</b>（左闭右开），
+              其余时段（含周末全天）为空闲价，官方空闲价 = 高峰价的一半。改动即时生效，无需重启。</div>
+            <div class="grid3">
+              <label class="fld"><span class="lb">高峰 · 输入 · 缓存命中</span>
+                <input name="peak_input_cache_hit" type="number" min="0" step="0.001" placeholder="0.04">
+                <span class="hint">官方 0.04</span></label>
+              <label class="fld"><span class="lb">高峰 · 输入 · 缓存未命中</span>
+                <input name="peak_input_cache_miss" type="number" min="0" step="0.001" placeholder="2">
+                <span class="hint">官方 2</span></label>
+              <label class="fld"><span class="lb">高峰 · 输出</span>
+                <input name="peak_output" type="number" min="0" step="0.001" placeholder="8">
+                <span class="hint">官方 8</span></label>
+            </div>
+            <div class="grid3">
+              <label class="fld"><span class="lb">空闲 · 输入 · 缓存命中</span>
+                <input name="offpeak_input_cache_hit" type="number" min="0" step="0.001" placeholder="0.02">
+                <span class="hint">官方 0.02</span></label>
+              <label class="fld"><span class="lb">空闲 · 输入 · 缓存未命中</span>
+                <input name="offpeak_input_cache_miss" type="number" min="0" step="0.001" placeholder="1">
+                <span class="hint">官方 1</span></label>
+              <label class="fld"><span class="lb">空闲 · 输出</span>
+                <input name="offpeak_output" type="number" min="0" step="0.001" placeholder="4">
+                <span class="hint">官方 4</span></label>
+            </div>
+            <div class="hr"></div>
+            <label class="fld"><span class="lb">额外按空闲计价的日期（逗号分隔）</span>
+              <input name="extra_offpeak_dates" placeholder="例如 2026-10-01, 2026-10-02">
+              <span class="hint">法定节假日 / 调休用：命中的日期<b>全天</b>按空闲价，优先于星期判断。
+                格式必须是 YYYY-MM-DD，非法项保存会被拒。本程序<b>不内置节假日表</b>（每年由国务院公告，
+                内置必然次年失效并静默算错价），需要时自行维护，留空 = 只按周末分峰谷。</span></label>
+            <div class="hint">这些价格只是<b>折算口径</b>，不影响选号、积分或上游计费；改错了只影响展示的金额。</div>
+          </div>
+        </div>
+
+        <div class="box">
           <header><h3>全量 auto 候选模型 <span class="hint">model=auto:all 时按此顺序跨模型降级</span></h3></header>
           <div class="pad">
             <div class="hint">请求 <code>auto:all</code> 时网关按下面的顺序逐个尝试候选模型：每个候选先跑完既有的账号轮转，

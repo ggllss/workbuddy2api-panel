@@ -87,5 +87,14 @@
     "enabled": true,
     "ttl": "30m",
     "gc_interval": "5m"
+  },
+  "cost": {
+    "peak_input_cache_hit": 0.04,
+    "peak_input_cache_miss": 2,
+    "peak_output": 8,
+    "offpeak_input_cache_hit": 0.02,
+    "offpeak_input_cache_miss": 1,
+    "offpeak_output": 4,
+    "extra_offpeak_dates": []
   }
 }

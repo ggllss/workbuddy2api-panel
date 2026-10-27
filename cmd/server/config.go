@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/server"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
 )
 
 // Config 顶层配置。
@@ -228,6 +230,32 @@ type Config struct {
 		GCInterval string `json:"gc_interval"` // 会话 GC 周期，默认 "5m"
 	} `json:"session_sticky"`
 
+	// Cost 当日 token 花费折算用的单价（元 / 百万 tokens）。
+	//
+	// 六档价格 + 一份「额外按空闲计价」的日期表，供 GET /api/cost/today 与面板
+	// 「今日金额」使用。缺省值即 DeepSeek V4.1 Flash 官方价；官方调价后改配置
+	// 即可，无需改代码。全部字段**热生效**（面板保存后下一个请求就用新价，
+	// 不进 restartRequiredFields）。
+	//
+	// 为什么峰谷两套单价都做成配置而不是「空闲 = 高峰 / 2」：官方脚注现在确实是
+	// 二分之一关系，但那属于当前定价策略而不是恒定规律；写死除法会在官方改成
+	// 别的比例时算出错价，而且看不出来。
+	Cost struct {
+		PeakInputCacheHit     float64 `json:"peak_input_cache_hit"`     // 高峰·输入·缓存命中
+		PeakInputCacheMiss    float64 `json:"peak_input_cache_miss"`    // 高峰·输入·缓存未命中
+		PeakOutput            float64 `json:"peak_output"`              // 高峰·输出
+		OffPeakInputCacheHit  float64 `json:"offpeak_input_cache_hit"`  // 空闲·输入·缓存命中
+		OffPeakInputCacheMiss float64 `json:"offpeak_input_cache_miss"` // 空闲·输入·缓存未命中
+		OffPeakOutput         float64 `json:"offpeak_output"`           // 空闲·输出
+		// ExtraOffPeakDates 额外按空闲价计的日期（"YYYY-MM-DD"，北京时间的日历日），
+		// 用于法定节假日/调休——这些日子既不是周末、也可能落在工作时段。
+		//
+		// 为什么不内置节假日表：中国法定节假日与调休每年由国务院公告，内置表必然
+		// 在次年失效并**静默**把节假日按高峰价算（金额虚高一倍），比留空更糟。
+		// 需要时自行补：["2026-10-01","2026-10-02"]。
+		ExtraOffPeakDates []string `json:"extra_offpeak_dates"`
+	} `json:"cost"`
+
 	// 解析后
 	SoftRateDur            time.Duration `json:"-"`
 	SoftRateMaxDur         time.Duration `json:"-"`
@@ -305,6 +333,17 @@ func Default() *Config {
 	c.Pool.ExpiringSoon = "168h" // 快过期窗口默认 7 天：官方活动奖励积分多在两周内过期
 	// costTier 探索默认 30m（issue #136：垄断破除 + 搭车改道零新增请求）；"0" 关停。
 	c.Pool.CostExploreInterval = "30m"
+	// 当日花费折算单价：缺省 = DeepSeek V4.1 Flash 官方价（元 / 百万 tokens）。
+	// 走 usage.DefaultPricing() 而不是在这里重抄六个数：官方价只该有一处真相
+	//（usage 包内），两处抄写迟早漂移，而「面板显示价与接口算的钱对不上」是最
+	// 难排查的一类错。用户可在 cost 段覆盖，改价后热生效、无需重启。
+	costPricing := usage.DefaultPricing()
+	c.Cost.PeakInputCacheHit = costPricing.PeakInputCacheHit
+	c.Cost.PeakInputCacheMiss = costPricing.PeakInputCacheMiss
+	c.Cost.PeakOutput = costPricing.PeakOutput
+	c.Cost.OffPeakInputCacheHit = costPricing.OffPeakInputCacheHit
+	c.Cost.OffPeakInputCacheMiss = costPricing.OffPeakInputCacheMiss
+	c.Cost.OffPeakOutput = costPricing.OffPeakOutput
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
@@ -611,10 +650,93 @@ func (c *Config) normalize() error {
 		}
 		c.BalanceRefreshInterval = time.Duration(c.Schedule.BalanceRefreshMinutes) * time.Minute
 	}
+	// 当日花费单价（元 / 百万 tokens）：负数 fail fast，**不**静默钳 0。
+	//
+	// 为什么不钳 0（本仓 credit_floor / expiring_soon 等键就是钳 0）：价格被钳 0
+	// 后接口会永久返回 ¥0.00 且毫无报错——面板上「今日金额 0.00」与「今天真的
+	// 没用 token」无法区分，属于最难发现的错价。这里取与 server.read_timeout
+	// 负值同一风格：明确报错。且 saveConfig 是「先 ParseConfig 校验、通过才落盘」，
+	// 面板里填负数只会收到报错、不会把坏值写进 config.json，不存在「改错就锁死」。
+	for _, pf := range []struct {
+		name string
+		v    float64
+	}{
+		{"peak_input_cache_hit", c.Cost.PeakInputCacheHit},
+		{"peak_input_cache_miss", c.Cost.PeakInputCacheMiss},
+		{"peak_output", c.Cost.PeakOutput},
+		{"offpeak_input_cache_hit", c.Cost.OffPeakInputCacheHit},
+		{"offpeak_input_cache_miss", c.Cost.OffPeakInputCacheMiss},
+		{"offpeak_output", c.Cost.OffPeakOutput},
+	} {
+		// JSON 规范不允许 NaN/Inf，但面板提交的 number 经 float 往返仍可能收到
+		// 极端值；一旦漏进来，金额会变成 NaN 并污染整个 JSON 响应（外部解析方
+		// 直接崩），所以在入口一并挡掉。
+		if math.IsNaN(pf.v) || math.IsInf(pf.v, 0) {
+			return fmt.Errorf("cost.%s: 价格必须是有限数值（收到 %v）", pf.name, pf.v)
+		}
+		if pf.v < 0 {
+			return fmt.Errorf("cost.%s: 价格不能为负（收到 %v）；如需停用计价功能请把整段 cost 配成 0 并知悉金额恒为 0", pf.name, pf.v)
+		}
+	}
+	// 节假日日期表：归一化（去空/去重）+ 格式校验（非法项 fail fast）。
+	if c.Cost.ExtraOffPeakDates, err = normalizeOffPeakDates(c.Cost.ExtraOffPeakDates); err != nil {
+		return err
+	}
 	if err := c.validateScheduleHours(); err != nil {
 		return err
 	}
 	return c.normalizePrompt()
+}
+
+// CostPricing 把 cost 配置段转成 usage.Pricing（供 main 构造热改 holder、
+// 计费与面板展示共用同一份价格）。
+//
+// 切片做浅拷贝：Hot 生效时新配置对象会被整体替换，但旧对象仍可能被并发读取，
+// 共享底层数组会让「读旧快照」看到新日期。
+func (c *Config) CostPricing() usage.Pricing {
+	return usage.Pricing{
+		PeakInputCacheHit:     c.Cost.PeakInputCacheHit,
+		PeakInputCacheMiss:    c.Cost.PeakInputCacheMiss,
+		PeakOutput:            c.Cost.PeakOutput,
+		OffPeakInputCacheHit:  c.Cost.OffPeakInputCacheHit,
+		OffPeakInputCacheMiss: c.Cost.OffPeakInputCacheMiss,
+		OffPeakOutput:         c.Cost.OffPeakOutput,
+		Unit:                  usage.UnitPerMillionTokens,
+		ExtraOffPeakDates:     append([]string(nil), c.Cost.ExtraOffPeakDates...),
+	}
+}
+
+// normalizeOffPeakDates 归一化「额外按空闲计价」的日期表：
+//
+//   - 去空白项：面板用逗号分隔录入，极易留下尾随空项；
+//   - 去重：重复项无害但会让面板回显越来越长，且不好看出配了几次；
+//   - 格式校验：必须是 YYYY-MM-DD 且能被解析（2026-02-30 这类不存在的日期也要拒），
+//     非法项 fail fast 并回显原值——静默丢弃等于让用户以为节假日配上了、
+//     实际仍按高峰价计费。
+func normalizeOffPeakDates(in []string) ([]string, error) {
+	if len(in) == 0 {
+		return nil, nil
+	}
+	out := make([]string, 0, len(in))
+	seen := make(map[string]bool, len(in))
+	for _, raw := range in {
+		d := strings.TrimSpace(raw)
+		if d == "" {
+			continue
+		}
+		ts, err := time.ParseInLocation("2006-01-02", d, time.Local)
+		// 回写比对：Parse 对 "2026-1-2" 这类非零填充写法是宽容的，而那样写进
+		// 配置后与计算侧 scope 的日期串永不相等（静默失效）。要求严格规范化形态。
+		if err != nil || ts.Format("2006-01-02") != d {
+			return nil, fmt.Errorf("cost.extra_offpeak_dates: %q 不是合法日期（须为 YYYY-MM-DD，如 2026-10-01）", raw)
+		}
+		if seen[d] {
+			continue
+		}
+		seen[d] = true
+		out = append(out, d)
+	}
+	return out, nil
 }
 
 // normalizeAutoCandidates 归一化全量 auto（auto:all）候选模型列表：

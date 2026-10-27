@@ -240,6 +240,14 @@ func main() {
 		SanitizeFingerprints: cfg.Features.SanitizeBlacklistFingerprints,
 		RecordClientInfo:     cfg.Logging.RequestClientInfo,
 	})
+	// 当日花费单价（元 / 百万 tokens）：热改 holder。server 的 /api/cost/today 与
+	// 面板「今日金额」共享同一份快照，面板改价后两边同时生效、不会各算一套。
+	costHolder := usage.NewPricingHolder(cfg.CostPricing())
+	log.Printf("[cost] 当日花费折算单价（元/百万 tokens）：高峰 命中 %.4g / 未命中 %.4g / 输出 %.4g；"+
+		"空闲 命中 %.4g / 未命中 %.4g / 输出 %.4g；额外空闲日 %d 天",
+		cfg.Cost.PeakInputCacheHit, cfg.Cost.PeakInputCacheMiss, cfg.Cost.PeakOutput,
+		cfg.Cost.OffPeakInputCacheHit, cfg.Cost.OffPeakInputCacheMiss, cfg.Cost.OffPeakOutput,
+		len(cfg.Cost.ExtraOffPeakDates))
 	// 用量记录器：与 state 文件同目录，随 state_file 配置一起搬移。
 	// datapath 由 state 文件路径推出，避免再加一个配置项。
 	usagePath := usagePathFor(cfg.StateFile)
@@ -276,6 +284,7 @@ func main() {
 		StickyCount: sessCount,
 		Version:     appVersion,
 		Live:        live,
+		Cost:        costHolder,
 		// 模型上限探测数据（scripts/probe_max_tokens.py --panel-out 写入）：
 		// 与 state 文件同目录，缺省 data/output_probes.json。
 		ProbeFile:  stateSibling(cfg.StateFile, "output_probes.json"),
@@ -284,7 +293,7 @@ func main() {
 			return Load(*cfgPath)
 		},
 		SaveConfig: func(raw []byte) ([]string, error) {
-			return saveConfig(raw, *cfgPath, live, p, up, sch)
+			return saveConfig(raw, *cfgPath, live, costHolder, p, up, sch)
 		},
 	})
 	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后
@@ -304,6 +313,7 @@ func main() {
 		Panel:        pn,
 		Live:         live,
 		Usage:        rec,
+		Cost:         costHolder,
 		RequestLog:   requestLog,
 		PromptMode:   cfg.Prompt.Mode,
 		PromptText:   cfg.PromptText,
@@ -412,6 +422,7 @@ func panelListenPath(listen string) string {
 //
 // 热生效范围（设计取舍）：
 //   - api_key / cooldown.soft_rate / features.sanitize_blacklist_fingerprints → livecfg 快照
+//   - cost.* → usage.PricingHolder（当日花费单价，热生效）
 //   - pool.* → pool.SetBreaker/SetMaxInFlight/SetSoftRateMax/SetWeights/SetCostExploreInterval/SetPreferExpiring/SetCreditFloor
 //   - auto.candidates → pool.SetAutoCandidates（全量 auto 候选列表，热生效）
 //   - schedule.* → scheduler.Reconfigure/SetBalanceInterval/SetExpiringSoonWindow
@@ -422,7 +433,7 @@ func panelListenPath(listen string) string {
 // 落盘用"先写 tmp 再 rename"原子替换，且优先保留磁盘上的原始 JSON 结构（只改
 // 面板表单覆盖到的键），避免把用户手写的注释性字段/未知键洗掉——这里直接整体
 // 序列化校验后的配置，未知键在 json.Unmarshal 时已丢失，故先合并原始 map。
-func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler) ([]string, error) {
+func saveConfig(raw []byte, path string, live *livecfg.Holder, cost *usage.PricingHolder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler) ([]string, error) {
 	// 1) 解析原始 JSON 为 map（保留用户手写的未知键），再叠加面板提交的键。
 	oldRaw, err := os.ReadFile(path)
 	if err != nil {
@@ -489,6 +500,8 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		RecordClientInfo:     newCfg.Logging.RequestClientInfo,
 	})
 	up.SanitizeFingerprints.Store(newCfg.Features.SanitizeBlacklistFingerprints)
+	// 当日花费单价热生效（下一个请求即用新价）；不进 restartRequiredFields。
+	cost.Store(newCfg.CostPricing())
 	p.SetBreaker(newCfg.Pool.BreakerThreshold, newCfg.BreakerCooldownDur, newCfg.BreakerCooldownMaxD)
 	p.SetMaxInFlight(newCfg.Pool.MaxInFlight)
 	p.SetMaxInFlightGlobal(newCfg.Pool.MaxInFlightGlobal)

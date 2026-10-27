@@ -61,6 +61,10 @@ type Config struct {
 
 	// Usage 逐请求用量记录器（nil = 用量接口返回 501）。
 	Usage *usage.Recorder
+	// Cost 当日花费折算单价（nil = 回落到内置官方价）。
+	// 与 server 包的 /api/cost/today 共用同一个 usage.PricingHolder，保证
+	// 面板显示的金额与外部程序读到的金额永远同源、同价。
+	Cost *usage.PricingHolder
 	// RequestLog 请求指标与归档（nil = 对应接口返回 501）。
 	RequestLog *reqlog.Recorder
 
@@ -798,7 +802,35 @@ func (p *Panel) usage(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Upstream != nil {
 		currentRate = p.cfg.Upstream.ModelRate
 	}
-	writeJSON(w, http.StatusOK, p.cfg.Usage.SnapshotWindow(win, nicks, currentRate))
+	// 今日金额（当日花费）随用量快照一起返回，不另开一个请求：
+	// 面板每次刷新已经拉了 /panel/api/usage，再打一次 /api/cost/today 只是多
+	// 一次往返 + 一次鉴权判定，而计费本身是纯内存聚合（微秒级），挂在同一次
+	// 响应里代价可忽略。副作用是面板展示的金额与统计窗口无关——金额恒按
+	// 「当天（本地日历日）」，与上面的 hours/from-to 窗口是两个口径，前端文案
+	// 里已注明。
+	writeJSON(w, http.StatusOK, usageWithCost{
+		Snapshot:  p.cfg.Usage.SnapshotWindow(win, nicks, currentRate),
+		TodayCost: panelCostToday(p.cfg.Usage, p.cfg.Cost),
+	})
+}
+
+// usageWithCost 是 /panel/api/usage 的响应体：用量快照 + 今日金额。
+//
+// 为什么用嵌入而不是给 usage.Snapshot 加字段：Snapshot 属于 usage 包，是
+// 「时间窗口内的用量视图」的完整描述，把价格/日期口径塞进去会让那个包同时
+// 关心计价；嵌入让新增字段只影响面板这一层，且 JSON 层面字段是平铺的
+// （Go 对嵌入结构体的字段做提升），前端 d.today_cost 直接可用，既有字段
+// 一个都不变。
+type usageWithCost struct {
+	usage.Snapshot
+	TodayCost usage.DayCost `json:"today_cost"`
+}
+
+// panelCostToday 算今日金额；Recorder 为 nil 时返回零值结构（金额 "0.00"），
+// 让前端不必为「用量记录被禁用」单独分支。Cost holder 的 Load 对 nil 安全，
+// 回落官方价。
+func panelCostToday(rec *usage.Recorder, cost *usage.PricingHolder) usage.DayCost {
+	return rec.CostToday(cost.Load())
 }
 
 // parseTimeParam 解析时间查询参数：unix 秒（前端默认）或 RFC3339（便于手工调
