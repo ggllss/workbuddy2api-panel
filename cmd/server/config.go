@@ -160,6 +160,13 @@ type Config struct {
 		AcceptEncodingParity bool `json:"accept_encoding_parity"`
 		// HeaderOrder 出站头名大小写与官方线上形态对齐（默认 true）。热生效。
 		HeaderOrder bool `json:"header_order"`
+		// EgressBackoff 出口级退避（默认 true）：把「链路瞬时抖动」类失败（传输错误 /
+		// 上游 5xx / 读 body 失败）记在**出口**上、只做 1s→15s 秒级退避，不再逐个账号
+		// 进分钟级熔断。账号自身问题（401/403/429/额度耗尽/内容拦截）照旧罚号。
+		// 关掉 = 逐字回到改造前行为。热生效。
+		EgressBackoff bool `json:"egress_backoff"`
+		// EgressBackoffMaxSeconds 出口退避封顶秒数；<=0 回落 15，上限 300。热生效。
+		EgressBackoffMaxSeconds int `json:"egress_backoff_max_seconds"`
 	} `json:"upstream"`
 
 	Features struct {
@@ -326,6 +333,9 @@ func Default() *Config {
 	c.Upstream.TLSFingerprint = "node"
 	c.Upstream.AcceptEncodingParity = true
 	c.Upstream.HeaderOrder = true
+	// 出口级退避默认开：链路抖动不该连坐账号（关掉 = 回到「逐账号分钟级熔断」旧行为）。
+	c.Upstream.EgressBackoff = true
+	c.Upstream.EgressBackoffMaxSeconds = 15
 	// Global.Enabled 缺省 true（纯 CN 行为不变：CN 账号恒判 cn，global base 不被使用）；
 	// ChatBase/BillingBase 缺省空（回落内置默认）。
 	c.Global.Enabled = true
@@ -655,6 +665,14 @@ func (c *Config) normalize() error {
 		return err
 	}
 	c.Upstream.TLSFingerprint = fp
+	// 出口退避封顶：<=0 回落 15s；上限 300s——再长就不如直接拒绝，让客户端干等
+	// 5 分钟以上只会把「秒级抖动」放大成用户可感知的卡死。
+	if c.Upstream.EgressBackoffMaxSeconds <= 0 {
+		c.Upstream.EgressBackoffMaxSeconds = 15
+	}
+	if c.Upstream.EgressBackoffMaxSeconds > 300 {
+		c.Upstream.EgressBackoffMaxSeconds = 300
+	}
 	if !strings.HasPrefix(c.Listen, ":") && !strings.Contains(c.Listen, ":") {
 		c.Listen = ":" + c.Listen
 	}

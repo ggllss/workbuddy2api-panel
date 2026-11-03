@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/egress"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/panel"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
@@ -257,6 +258,13 @@ func main() {
 		cfg.Cost.PeakInputCacheHit, cfg.Cost.PeakInputCacheMiss, cfg.Cost.PeakOutput,
 		cfg.Cost.OffPeakInputCacheHit, cfg.Cost.OffPeakInputCacheMiss, cfg.Cost.OffPeakOutput,
 		len(cfg.Cost.ExtraOffPeakDates))
+	// 出口级退避闸：同一实例注入 server（前置闸 + 失败记账 + 成功清零）。关掉
+	// （egress_backoff=false）时 Enabled()==false，handler 逐字走改造前的账号级路径。
+	// 单独定义在这里是为了让下面 SaveConfig 闭包也能拿到它（热改）。
+	egressGate := egress.New(egress.Config{
+		Enabled: cfg.Upstream.EgressBackoff,
+		Max:     time.Duration(cfg.Upstream.EgressBackoffMaxSeconds) * time.Second,
+	})
 	// 用量记录器：与 state 文件同目录，随 state_file 配置一起搬移。
 	// datapath 由 state 文件路径推出，避免再加一个配置项。
 	usagePath := usagePathFor(cfg.StateFile)
@@ -302,7 +310,7 @@ func main() {
 			return Load(*cfgPath)
 		},
 		SaveConfig: func(raw []byte) ([]string, error) {
-			return saveConfig(raw, *cfgPath, live, costHolder, p, up, sch)
+			return saveConfig(raw, *cfgPath, live, costHolder, egressGate, p, up, sch)
 		},
 	})
 	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后
@@ -323,6 +331,7 @@ func main() {
 		Live:         live,
 		Usage:        rec,
 		Cost:         costHolder,
+		Egress:       egressGate,
 		RequestLog:   requestLog,
 		PromptMode:   cfg.Prompt.Mode,
 		PromptText:   cfg.PromptText,
@@ -442,7 +451,7 @@ func panelListenPath(listen string) string {
 // 落盘用"先写 tmp 再 rename"原子替换，且优先保留磁盘上的原始 JSON 结构（只改
 // 面板表单覆盖到的键），避免把用户手写的注释性字段/未知键洗掉——这里直接整体
 // 序列化校验后的配置，未知键在 json.Unmarshal 时已丢失，故先合并原始 map。
-func saveConfig(raw []byte, path string, live *livecfg.Holder, cost *usage.PricingHolder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler) ([]string, error) {
+func saveConfig(raw []byte, path string, live *livecfg.Holder, cost *usage.PricingHolder, eg *egress.Gate, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler) ([]string, error) {
 	// 1) 解析原始 JSON 为 map（保留用户手写的未知键），再叠加面板提交的键。
 	oldRaw, err := os.ReadFile(path)
 	if err != nil {
@@ -519,6 +528,9 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, cost *usage.Prici
 	up.SetHeaderOrder(newCfg.Upstream.HeaderOrder)
 	// 当日花费单价热生效（下一个请求即用新价）；不进 restartRequiredFields。
 	cost.Store(newCfg.CostPricing())
+	// 出口退避热生效（不进 restartRequiredFields）：关掉时 Configure 会顺手清空
+	// 在途退避，避免「已关开关却还被上一轮抖动拖着等」。
+	eg.Configure(newCfg.Upstream.EgressBackoff, time.Duration(newCfg.Upstream.EgressBackoffMaxSeconds)*time.Second)
 	p.SetBreaker(newCfg.Pool.BreakerThreshold, newCfg.BreakerCooldownDur, newCfg.BreakerCooldownMaxD)
 	p.SetMaxInFlight(newCfg.Pool.MaxInFlight)
 	p.SetMaxInFlightGlobal(newCfg.Pool.MaxInFlightGlobal)

@@ -54,7 +54,9 @@
     "passthrough_ip": false,
     "tls_fingerprint": "node",
     "accept_encoding_parity": true,
-    "header_order": true
+    "header_order": true,
+    "egress_backoff": true,
+    "egress_backoff_max_seconds": 15
   },
   "features": {
     "sanitize_blacklist_fingerprints": true
