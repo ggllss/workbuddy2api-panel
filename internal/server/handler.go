@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/egress"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
@@ -34,6 +35,11 @@ type Config struct {
 	Upstream  *upstream.Client
 	APIKey    string // 空 = 不鉴权（静态值；与 Live 同时给出时 Live 优先）
 	MaxRotate int    // 单请求最多换号次数，默认 3
+	// Egress 出口级退避闸（可选；nil = 未启用，逐字保留改造前行为）。
+	// 链路/出口类失败（传输层错误、上游 5xx、网关侧读 body 失败）记在出口上，
+	// 只触发秒级全局退避；账号自身问题（401/403/429/额度/内容拦截等）照旧罚号。
+	// 归责判定见 upstream.FaultOfKind，状态机见 internal/egress。
+	Egress *egress.Gate
 	// Session 会话粘性路由器（可选；nil = 关闭粘性，纯 Pick 轮换）。
 	Session *session.Router
 	// StickyCount 返回当前粘性会话绑定数（供 /status）；nil 时报告 0。
@@ -916,6 +922,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
+			// 出口退避前置闸：窗口内不发上游请求（只等不拒绝，见 egressAwait）。
+			// 这是「退避期间零上游请求」的唯一保证点——所有尝试都从这里出去。
+			if !h.egressAwait(r.Context()) {
+				st.status = http.StatusServiceUnavailable
+				lastErr = errEgressBackoff
+				log.Printf("WARN: [server] egress backoff: wait aborted (client gone or shutdown), rotation stopped")
+				break
+			}
+
 			// 客户端 IP 按请求传递（PassthroughIP 开启时注入；消除共享字段竞态）。
 			attemptStarted := time.Now()
 			rc, status, respBody, terr := h.cfg.Upstream.ChatStreamContext(r.Context(), acct, body, clientIP, chatMeta)
@@ -953,7 +968,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
 				st.status = http.StatusServiceUnavailable
 				lastErr = terr
-				h.cfg.Pool.NoteFailures(acct.UID)
+				// 归责（upstream.FaultOfTransport）：传输层错误一个字节都没到业务层，
+				// 与「这个账号能不能用」无关——出口退避启用时记在出口上、**不喂账号
+				// 连败**（这正是「一次链路抖动轮流烧掉全池账号」的根因）；未启用时
+				// 逐字保留改造前的 NoteFailures 路径。
+				if !h.noteEgressFailure("transport") {
+					h.cfg.Pool.NoteFailures(acct.UID)
+				}
 				fail(acct.UID)
 				if !rotateBackoff(i, r.Context()) {
 					break // ctx 取消：终止轮转（传输层错误换号退避）
@@ -1124,6 +1145,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					// 真成功：这一跳读完且上游没有报错，才记成功并让粘性跟上。
 					st.outcome = reqlog.OutcomeSuccess
 					h.cfg.Pool.NoteSuccess(acct.UID)
+					// 出口也成功了一次：清零出口级退避（抖动是瞬时的，通了就放行）。
+					h.egressSuccess()
 					// 11102 负缓存清命：该账号该模型实测成功，立即解除避让（不必等 TTL 到期）。
 					// BlockModelClear 按 "11102" reason 前缀识别，只清 11102 条目、不碰 6004 独立冷却。
 					h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
@@ -1176,6 +1199,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			rc.Close()
 			if err != nil {
 				recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
+				// 网关侧读 body 失败（上游开了 200 却在读流途中断掉/截断）：归出口
+				// （upstream.FaultOfTransport 同口径）——不是这个账号的错，记在出口上
+				// 让后续请求先等几秒再发，而不是把健康号逐个喂熔断。
+				h.noteEgressFailure("read upstream body")
 				// 上游流解析失败：客户端还没看到任何输出，回 502 并告知原因。
 				writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
 				st.status = http.StatusBadGateway
@@ -1210,6 +1237,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			st.toks = completionTokens(resp)
 			// 非流式同理：聚合成功（无 error 帧、非空流）才算这一跳成功，事后才记成功/绑粘性。
 			h.cfg.Pool.NoteSuccess(acct.UID)
+			// 出口成功清零出口级退避（与流式真成功同口径）。
+			h.egressSuccess()
 			h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
 			if sessKey != "" && h.cfg.Session != nil {
 				h.cfg.Session.Bind(sessKey, acct.UID)
@@ -1291,6 +1320,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(lastErr, errUpstreamTimeout) {
 			code = "upstream_timeout"
 			msg = "upstream timed out: rotation stopped (another account would hit the same slow upstream), please retry later"
+		}
+		// 出口退避等待被中断（客户端断连/停机）：给一条能区分「出口问题」的文案，
+		// 别混进 no_healthy_account——池里账号可能全是好的，问题在链路。
+		if errors.Is(lastErr, errEgressBackoff) {
+			code = "egress_backoff"
+			msg = "gateway egress backoff: a transient network/upstream failure just happened on this egress, please retry in a few seconds"
 		}
 		// gateway_hint（末端透传）：上游错误按 Kind + 原文 + 请求形态判定；本地调度类
 		// 错误（无上游原文）固定 no_healthy_account hint。
@@ -1464,6 +1499,11 @@ func rotateBackoff(i int, ctx context.Context) bool {
 // errUpstreamTimeout 上游超时的哨兵：末端出口据此给出与「没号可用」可区分的文案。
 var errUpstreamTimeout = errors.New("upstream timeout")
 
+// errEgressBackoff 出口级退避等待被中断的哨兵（客户端断连 / 优雅停机）：末端出口
+// 据此给出与「没号可用」「上游超时」都可区分的文案——退避期内的失败是**出口**
+// 的问题，重试方向是等出口恢复，不是换号也不是换模型。
+var errEgressBackoff = errors.New("egress backoff in progress")
+
 // isUpstreamTimeout 判断这一跳的失败是否属于「上游超时 / 停滞」。超时不是账号的
 // 问题，换号注定白换（同一份请求撞同一个慢上游），必须止损：不轮转、不罚号。
 // 三态判定见传输层错误分支的注释。
@@ -1507,7 +1547,9 @@ func isUpstreamTimeout(err error, clientGone bool) bool {
 //     不喂连败），chatCompletions 已直接透传原文返回不轮转。
 //   - ErrModelBlocked → BlockModelBackoff：(账号, 模型) 11102 负缓存避让。
 //   - ErrServer → NoteError：喂单一连续失败计数器 fails + 累计错误 errTotal，
-//     达到 breakerThreshold 触发熔断（指数退避）。
+//     达到 breakerThreshold 触发熔断（指数退避）。**出口退避启用时**（upstream.
+//     egress_backoff）改记出口、只做秒级退避，不喂账号熔断——5xx 是上游/链路的
+//     故障，罚号只会把健康号一个个烧掉（见 egress.go 与 upstream.FaultOfKind）。
 //   - 其他（default：ErrClient/ErrNone）→ 只换号不罚（防雪崩），不喂熔断；ErrClient
 //     额外喂连败计数（NoteFailures，issue #114）：未知 4xx 连败 N 次临时出池。
 //
@@ -1579,6 +1621,14 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.softCooldown(), "account fault (14017)")
 	case upstream.ErrServer:
 		// 5xx 上游故障：Classify 已把 ≥500 判为 ErrServer，在此喂熔断计数（不再手写 status>=500）。
+		//
+		// 归责（upstream.FaultOfKind）：5xx 是上游/链路侧的故障，同一请求换哪个账号
+		// 都会撞上同一个坏上游——出口退避启用时改记出口（秒级退避，见 noteEgressFailure），
+		// **不喂账号熔断**（这正是「一次抖动把每个账号轮流烧一遍」的根因）。未启用时
+		// 逐字保留改造前的 NoteError 路径，账号级熔断一点没削弱。
+		if h.noteEgressFailure("upstream 5xx") {
+			return
+		}
 		h.cfg.Pool.NoteError(uid)
 	case upstream.ErrContentBlocked:
 		// 内容策略拦截（误报）：内容问题非账号问题，不罚账号（无冷却/熔断/NoteError）。
