@@ -6,10 +6,14 @@
 package upstream
 
 import (
+	"context"
 	"crypto/tls"
+	"fmt"
 	"net"
 	"net/http"
 	"time"
+
+	utls "github.com/refraction-networking/utls"
 )
 
 // 连接层参数集中定义（与 server/backoff.go 同风格：一处定义，测试可回读断言）。
@@ -71,10 +75,22 @@ func newDialer() *net.Dialer {
 //     完成后无 h2 协议可用，连接退回 HTTP/1.1）。
 //   - TCP 层：DialContext 10s 建连上限 + 15s keepalive 探测，半开连接在建立期
 //     和复用期都能被快速识别（见 dialTimeout/dialKeepAlive 注释）。
-func newTransport() *http.Transport {
+//
+// 第三层（出站指纹，2026-10 上游收紧非官方客户端识别后补）：
+//   - DialTLSContext 接管整条 TLS 拨号：返回**已握手**的 conn，握手形态由 tiers 的
+//     当前档位决定（node 复刻官方 Node/OpenSSL ClientHello，go 回退 crypto/tls）。
+//     为什么必须接管整个拨号而不是只包 DialContext：http.Transport 在 DialContext
+//     之上自己完成 TLS 握手，指纹在那一层已经写死在 crypto/tls 里。
+//   - 代价：设了 DialTLSContext 之后 Transport 的 TLSHandshakeTimeout 与
+//     TLSClientConfig 不再生效，握手超时与 ServerName 由 tlsHandshake 自行保证。
+//   - TLSNextProto 仍必须非 nil 的 make：复刻档位不带 ALPN，但回滚到 go 档位时
+//     crypto/tls 默认会经 ALPN 协商 h2，空映射是「任何档位都禁 h2」的兜底。
+func newTransport(tiers *outboundTiers) *http.Transport {
 	dialer := newDialer()
 	return &http.Transport{
 		DialContext: dialer.DialContext,
+		// DialTLSContext 接管整条 TLS 拨号：见函数注释。
+		DialTLSContext: newTLSDialer(dialer, tiers),
 		// 空 TLSNextProto（非 nil）真正禁 h2：见函数注释。必须 make 而非 nil——
 		// nil 表示「让标准库注入默认 h2 映射」（kongjianguan 实测：设
 		// ForceAttemptHTTP2=false 后日志仍报 h2 timeout，正是这个陷阱）。
@@ -85,6 +101,90 @@ func newTransport() *http.Transport {
 		IdleConnTimeout:       idleConnTimeout,
 		ResponseHeaderTimeout: responseHeaderTimeout,
 	}
+}
+
+// newTLSDialer 构造出站 TLS 拨号函数：TCP →（按档位）TLS 握手。
+//
+// 档位在**每次拨号时**从 tiers 原子读取，所以改配置后新建的连接立即用新档位，
+// 不必重启；已建连接在池里继续用旧档位，直到 IdleConnTimeout 或切换时的显式
+// CloseIdleConnections（见 Client.SetTLSFingerprint）。
+func newTLSDialer(d *net.Dialer, tiers *outboundTiers) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		raw, err := d.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		return tlsHandshake(ctx, raw, addr, nil, tiers.fingerprintValue())
+	}
+}
+
+// tlsHandshake 在 raw 上按档位握手；失败时关闭 raw 并返回错误。
+//
+// cfg 为 nil 时用最小默认配置（生产恒 nil）；测试注入 InsecureSkipVerify +
+// ServerName 用裸监听验证整条链路——ServerName 显式指定是抓包测试的前提：
+// 监听地址是 IP 时 uTLS 按 RFC 6066 不发 SNI 扩展，ClientHello 少一项，JA3/JA4
+// 必然对不上。
+func tlsHandshake(ctx context.Context, raw net.Conn, addr string, cfg *tls.Config, fp string) (net.Conn, error) {
+	insecure := cfg != nil && cfg.InsecureSkipVerify
+	host, _, splitErr := net.SplitHostPort(addr)
+	if splitErr != nil {
+		host = addr
+	}
+	if cfg != nil && cfg.ServerName != "" {
+		host = cfg.ServerName
+	}
+	hctx, cancel := context.WithTimeout(ctx, tlsHandshakeTimeout)
+	defer cancel()
+
+	// 复刻路径：uTLS 手搓官方 ClientHello。ALPN 刻意留空——官方 Node 栈就是
+	// 不带 ALPN，与本仓禁 h2 口径一致（见 newTransport 注释）。
+	if useNodeFingerprint(fp) {
+		uc := utls.UClient(raw, &utls.Config{
+			ServerName:         host,
+			InsecureSkipVerify: insecure,
+			MinVersion:         tls.VersionTLS12,
+		}, utls.HelloCustom)
+		if perr := uc.ApplyPreset(officialHelloSpec()); perr != nil {
+			raw.Close()
+			return nil, fmt.Errorf("tls fingerprint preset: %w", perr)
+		}
+		if herr := uc.HandshakeContext(hctx); herr != nil {
+			raw.Close()
+			return nil, herr
+		}
+		return uc, nil
+	}
+
+	// 原生路径：crypto/tls。NextProtos 显式置 nil，与复刻档位一样不发 ALPN。
+	var tc0 *tls.Config
+	if cfg != nil {
+		tc0 = cfg.Clone()
+	} else {
+		tc0 = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	tc0.ServerName = host
+	tc0.NextProtos = nil
+	tc := tls.Client(raw, tc0)
+	if herr := tc.HandshakeContext(hctx); herr != nil {
+		raw.Close()
+		return nil, herr
+	}
+	return tc, nil
+}
+
+// UnwrapTransport 取出出站包装层里的底层 *http.Transport；非本仓类型返回 nil。
+//
+// 为什么需要：ChatHTTP.Transport 现在是 parityRoundTripper（T2 解码收口），
+// main.go 里 `up.ChatHTTP.Transport.(*http.Transport)` 会**静默失败**，
+// ResponseHeaderTimeout 配不上而无人察觉（首字节超时保护直接丢失）。
+func UnwrapTransport(rt http.RoundTripper) *http.Transport {
+	if t, ok := rt.(*http.Transport); ok {
+		return t
+	}
+	if p, ok := rt.(*parityRoundTripper); ok {
+		return p.base
+	}
+	return nil
 }
 
 // closeIdler 实现该接口的 RoundTripper 支持清空空闲连接池（*http.Transport、

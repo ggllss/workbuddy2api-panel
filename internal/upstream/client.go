@@ -681,25 +681,94 @@ type Client struct {
 	// false 时即便用户 auth 写了 realm=global 也**不**路由到 global base——
 	// chatBase/billingBase 返回 CN base，路径也走 CN（双保险，与 auth.Realm() 的开关闸呼应）。
 	GlobalEnabled bool
+
+	// out 出站三件套的运行期档位（TLS 指纹 / Accept-Encoding 对齐 / 头名大小写），
+	// 见 outbound.go。nil 时按生产默认档位处理（全开），供测试裸构造 Client 使用。
+	out *outboundTiers
 }
 
 // New 生产默认值。Transport 由 newTransport() 集中构造（连接层加固：真正禁 h2 /
 // TLS 握手超时 / 短 keepalive 探测 / 失败清池，参数见 transport.go——吸收上游
-// kongjianguan 4 连击实测经验）。
+// kongjianguan 4 连击实测经验）。出站指纹三件套见 outbound.go / tlsfingerprint.go。
 func New() *Client {
-	tr := newTransport()
+	tiers := newOutboundTiers()
+	tr := newTransport(tiers)
+	// 包装层做 T2 解码收口与 T3 头名对齐；底层 *http.Transport 仍由两个 client 共享，
+	// 连接池不重复。
+	rt := newOutboundRoundTripper(tr, tiers)
 	c := &Client{
-		HTTP:          &http.Client{Timeout: 120 * time.Second, Transport: tr},
-		ChatHTTP:      &http.Client{Timeout: 0, Transport: tr}, // 无总时长；首字节由 ResponseHeaderTimeout 管
+		HTTP:          &http.Client{Timeout: 120 * time.Second, Transport: rt},
+		ChatHTTP:      &http.Client{Timeout: 0, Transport: rt}, // 无总时长；首字节由 ResponseHeaderTimeout 管
 		ChatBaseCN:    "https://copilot.tencent.com",
 		BillingBaseCN: "https://www.codebuddy.cn",
 		WebBaseCN:     "https://www.workbuddy.cn",
 		// GlobalEnabled 缺省 true（与 config global.enabled 缺省 true 一致；纯 CN 部署行为不变：
 		// CN 账号恒判 cn，global base 只在 realm=global 的账号上被使用）。
 		GlobalEnabled: true,
+		out:           tiers,
 	}
 	c.SanitizeFingerprints.Store(true)
 	return c
+}
+
+// outboundTiersOrNil 出站档位持有者；测试裸构造的 Client 没有 out，
+// 返回 nil 让各读取点按生产默认（全开）处理。
+func (c *Client) outboundTiersOrNil() *outboundTiers {
+	if c == nil {
+		return nil
+	}
+	return c.out
+}
+
+// SetTLSFingerprint 切换出站 ClientHello 档位（node 复刻官方 / go 原生）。
+//
+// 运行期可切换而不是构造期固定：线上一旦出现「换了指纹反而握手失败」，改一行配置
+// 就回滚到原生形态，不必重新发版。切换后显式清空空闲连接池——池里的连接是用旧档位
+// 握的手，不清就会被下一个请求继续复用，表现为「配置改了但指纹没变」。
+func (c *Client) SetTLSFingerprint(fp string) error {
+	norm, err := ValidateTLSFingerprint(fp)
+	if err != nil {
+		return err
+	}
+	if c.out == nil {
+		return nil // 测试裸构造（未接线 Transport）：无档位可切，不报错
+	}
+	c.out.fingerprint.Store(norm)
+	c.closeIdleConnections()
+	return nil
+}
+
+// TLSFingerprint 当前生效的出站指纹档位（排障/面板展示用）。
+func (c *Client) TLSFingerprint() string {
+	return c.outboundTiersOrNil().fingerprintValue()
+}
+
+// SetAcceptEncodingParity 切换 Accept-Encoding 对齐与解码收口（T2）。
+// 关掉后既不发四段声明也不套解码层，回到 Go 透明 gzip 的老行为。
+func (c *Client) SetAcceptEncodingParity(on bool) {
+	if c.out == nil {
+		return
+	}
+	c.out.acceptEncoding.Store(on)
+	c.closeIdleConnections()
+}
+
+// SetHeaderOrder 切换出站头名大小写对齐（T3）。关掉后完全走 Go 原生形态。
+func (c *Client) SetHeaderOrder(on bool) {
+	if c.out == nil {
+		return
+	}
+	c.out.headerOrder.Store(on)
+}
+
+// closeIdleConnections 清掉两个 client 的空闲连接池（best-effort）。
+func (c *Client) closeIdleConnections() {
+	for _, cl := range []*http.Client{c.HTTP, c.ChatHTTP} {
+		if cl == nil {
+			continue
+		}
+		roundTripCloseIdle(cl.Transport)
+	}
 }
 
 // chatHTTP 返回聊天专用 client；未设置（如测试只注入 HTTP）时回落 HTTP。

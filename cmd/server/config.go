@@ -15,6 +15,7 @@ import (
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/server"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
 )
 
@@ -150,6 +151,15 @@ type Config struct {
 		DeviceTokenFile string `json:"device_token_file"`
 		// PassthroughIP 是否透传客户端 IP 给上游（默认 false，反代安全边界）。
 		PassthroughIP bool `json:"passthrough_ip"`
+		// TLSFingerprint 出站 TLS ClientHello 指纹档位："node"（复刻官方 Node/OpenSSL
+		// 形态，默认）/"go"（回滚 crypto/tls 原生）。热生效：改后新连接立即用新档位。
+		TLSFingerprint string `json:"tls_fingerprint"`
+		// AcceptEncodingParity 出站补 Accept-Encoding 四段声明（gzip, compress,
+		// deflate, br）并在 Transport 层统一解码（默认 true）。关掉 = 不发该头、
+		// 不套解码层，回到 Go 透明 gzip 老行为。热生效。
+		AcceptEncodingParity bool `json:"accept_encoding_parity"`
+		// HeaderOrder 出站头名大小写与官方线上形态对齐（默认 true）。热生效。
+		HeaderOrder bool `json:"header_order"`
 	} `json:"upstream"`
 
 	Features struct {
@@ -311,6 +321,11 @@ func Default() *Config {
 	// HeaderTimeoutSeconds/IdleTimeoutSeconds 默认 0（未设置态），回落见 normalize()。
 	c.Upstream.HeaderTimeoutSeconds = 0
 	c.Upstream.IdleTimeoutSeconds = 0
+	// 出站指纹三件套：TLS 指纹默认 node（复刻官方形态），另两项默认开。
+	// 与上面 schedule 开关同理——键缺席时保留这里的 true，只有显式 false 才关。
+	c.Upstream.TLSFingerprint = "node"
+	c.Upstream.AcceptEncodingParity = true
+	c.Upstream.HeaderOrder = true
 	// Global.Enabled 缺省 true（纯 CN 行为不变：CN 账号恒判 cn，global base 不被使用）；
 	// ChatBase/BillingBase 缺省空（回落内置默认）。
 	c.Global.Enabled = true
@@ -484,6 +499,19 @@ func applyEnv(c *Config) {
 			c.Upstream.PassthroughIP = b
 		}
 	}
+	if v := os.Getenv("WB2A_TLS_FINGERPRINT"); v != "" {
+		c.Upstream.TLSFingerprint = v
+	}
+	if v := os.Getenv("WB2A_ACCEPT_ENCODING_PARITY"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Upstream.AcceptEncodingParity = b
+		}
+	}
+	if v := os.Getenv("WB2A_HEADER_ORDER"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Upstream.HeaderOrder = b
+		}
+	}
 	if v := os.Getenv("WB2A_SANITIZE_FINGERPRINTS"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Features.SanitizeBlacklistFingerprints = b
@@ -620,6 +648,13 @@ func (c *Config) normalize() error {
 	if c.Upstream.IdleTimeoutSeconds <= 0 {
 		c.Upstream.IdleTimeoutSeconds = 300
 	}
+	// 出站指纹档位 fail fast：非法取值不静默回落默认——回滚开关写错（比如写成
+	// "native"）会让人以为已切回 go 档，实际还在 node 档，排障时南辕北辙。
+	fp, err := upstream.ValidateTLSFingerprint(c.Upstream.TLSFingerprint)
+	if err != nil {
+		return err
+	}
+	c.Upstream.TLSFingerprint = fp
 	if !strings.HasPrefix(c.Listen, ":") && !strings.Contains(c.Listen, ":") {
 		c.Listen = ":" + c.Listen
 	}

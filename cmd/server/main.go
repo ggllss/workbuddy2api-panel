@@ -145,7 +145,7 @@ func main() {
 	up.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	// 聊天 SSE 首字节前（响应头）上限：cfg 已 normalize（缺省回落 timeout_seconds）。
 	up.HeaderTimeout = time.Duration(cfg.Upstream.HeaderTimeoutSeconds) * time.Second
-	if tr, ok := up.ChatHTTP.Transport.(*http.Transport); ok {
+	if tr := upstream.UnwrapTransport(up.ChatHTTP.Transport); tr != nil {
 		tr.ResponseHeaderTimeout = up.HeaderTimeout
 	}
 	// 聊天 SSE 流中空闲上限（S3 空闲监控读取）。
@@ -161,6 +161,15 @@ func main() {
 	up.DeviceToken = cfg.Upstream.DeviceToken
 	up.DeviceTokenFile = cfg.Upstream.DeviceTokenFile
 	up.PassthroughIP = cfg.Upstream.PassthroughIP
+	// 出站指纹三件套（各带独立开关，可单独回滚；均为 atomic 热生效，
+	// 改配置后新连接/新请求立即按新档位，不必重启——见 upstream/outbound.go）。
+	// 取值合法性已在 config normalize 阶段 fail fast，这里理论不可失败；
+	// 仍显式处理，避免"配置写错静默用默认档位"。
+	if err := up.SetTLSFingerprint(cfg.Upstream.TLSFingerprint); err != nil {
+		log.Fatalf("upstream.tls_fingerprint: %v", err)
+	}
+	up.SetAcceptEncodingParity(cfg.Upstream.AcceptEncodingParity)
+	up.SetHeaderOrder(cfg.Upstream.HeaderOrder)
 	// global realm 路由（config global 段）：上游侧开关（第一道闸）+ base 覆盖；
 	// auth 侧开关（auth.SetGlobalEnabled）是第二道闸，两者同 config global.enabled。
 	up.GlobalEnabled = cfg.Global.Enabled
@@ -500,6 +509,14 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, cost *usage.Prici
 		RecordClientInfo:     newCfg.Logging.RequestClientInfo,
 	})
 	up.SanitizeFingerprints.Store(newCfg.Features.SanitizeBlacklistFingerprints)
+	// 出站指纹三件套热生效（不进 restartRequiredFields）：三档都是 atomic，改完
+	// 新连接/新请求立即按新值；tls 档位切换会清空闲连接池——池里是旧档位握的
+	// 连接，不清就会被下一个请求继续复用，表现为「配置改了但指纹没变」。
+	if err := up.SetTLSFingerprint(newCfg.Upstream.TLSFingerprint); err != nil {
+		return nil, err
+	}
+	up.SetAcceptEncodingParity(newCfg.Upstream.AcceptEncodingParity)
+	up.SetHeaderOrder(newCfg.Upstream.HeaderOrder)
 	// 当日花费单价热生效（下一个请求即用新价）；不进 restartRequiredFields。
 	cost.Store(newCfg.CostPricing())
 	p.SetBreaker(newCfg.Pool.BreakerThreshold, newCfg.BreakerCooldownDur, newCfg.BreakerCooldownMaxD)

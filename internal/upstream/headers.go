@@ -238,6 +238,14 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 	c.injectDeviceToken(req, a)
 	// 会话头族（对话/请求/消息/B3 链路），见 injectConversationHeaders。
 	c.injectConversationHeaders(req, meta)
+	// T5 官方 chat 头集合补齐（三族，必须在会话头之后——链路单头/baggage/ACP 要
+	// 回读会话头已设好的 trace/span/conversation 值）：
+	//   x-stainless-* / x-agent-* / X-Private-Data：openai-node SDK 与 agent 段形态
+	//   X-B3-ParentSpanId + b3 + traceparent + baggage：链路族完整形态
+	//   acp-connection-id：官方标准出站头族的会话连接标识
+	c.injectClientSDKHeaders(req, a)
+	c.injectTraceParityHeaders(req)
+	c.injectAcpConnectionID(req, a)
 }
 
 // injectGlobalChatHeaders global 账号（无企业 ID）的 chat 专属声明头，对齐 intl 项目
@@ -408,4 +416,125 @@ func (c *Client) RefreshHeaders(req *http.Request, a *auth.Auth) {
 	}
 	// X-Auth-Refresh-Source 对齐官方客户端 refresh 渠道标识 "plugin"（D3）。
 	req.Header.Set("X-Auth-Refresh-Source", "plugin")
+}
+
+// ---------------------------------------------------------------------------
+// 官方客户端 SDK / agent / 链路族出站头（T5：2026-10 上游收紧识别后补齐）
+//
+// 依据：参考实现（MIT 同源）对官方 5.8.3/5.9.3 两版真机抓包的逐头比对，以及
+// openai-node SDK 的固定常量表。这些头**只在 chat 链路发**——billing / checkin /
+// report 等 REST 域没有真机对照证据，不臆造（多发一个客户端从不发的头同样是
+// 可判别形态，这一点与本仓「宁缺毋滥」的口径一致）。
+// ---------------------------------------------------------------------------
+
+// 官方 chat 出站的自报 SDK 指纹（两版实测完全一致）。
+// 网关是 Go 实现、没有对应 SDK 运行时，故按官方实测值固定；客户端版本变化时
+// （package-version / node 版本）这几个常量需要跟着更新。
+const (
+	clientArch        = "x64"
+	clientOS          = "Windows"
+	clientLang        = "js"
+	clientRuntime     = "node"
+	clientNodeVer     = "v22.21.1"
+	clientSDKVer      = "6.25.0"
+	agentTypeMain     = "main"
+	agentIntentCraft  = "craft"
+	agentRuntimeLocal = "local-agent"
+)
+
+// injectClientSDKHeaders 注入 x-stainless-*（openai-node SDK 自动加）、x-agent-*
+// 与 X-Private-Data 三族出站头。
+//
+// 为什么必须补：官方 chat 由 openai-node SDK 发出，头集合里天然带 SDK 段与 agent
+// 段；我们此前只有业务头，等于向 WAF 交了一份「缺 SDK 段的残缺头集合」。
+func (c *Client) injectClientSDKHeaders(req *http.Request, a *auth.Auth) {
+	// X-Agent-Type / X-Agent-Intent：官方 chat 必带的场景语义头。
+	req.Header.Set("X-Agent-Type", agentTypeMain)
+	req.Header.Set("X-Agent-Intent", agentIntentCraft)
+	// x-stainless-*：SDK 运行时自报形态，七件缺一即与真机不同形。
+	req.Header.Set("X-Stainless-Lang", clientLang)
+	req.Header.Set("X-Stainless-Package-Version", clientSDKVer)
+	req.Header.Set("X-Stainless-OS", clientOS)
+	req.Header.Set("X-Stainless-Arch", clientArch)
+	req.Header.Set("X-Stainless-Runtime", clientRuntime)
+	req.Header.Set("X-Stainless-Runtime-Version", clientNodeVer)
+	req.Header.Set("X-Stainless-Retry-Count", "0")
+	// X-Agent-Runtime：桌面端本地对话恒 local-agent（枚举另两值是 cloud/agent）。
+	req.Header.Set("X-Agent-Runtime", agentRuntimeLocal)
+	// X-Private-Data：真机默认 "false"（开了模型优化 = 声明允许用于改进）；
+	// 只有企业版（默认关模型优化）才是 "true"。
+	req.Header.Set("X-Private-Data", privateDataHeaderValue(a))
+}
+
+// privateDataHeaderValue 出站 X-Private-Data 取值。
+//
+// 客户端逻辑：`resolveModelOptimizationEnabled() ? "false" : "true"`，其中
+// 企业版默认关模型优化 → "true"；个人号 → "false"（真机 7/7 条 chat 全是 false）。
+func privateDataHeaderValue(a *auth.Auth) string {
+	if a != nil && a.IsEnterprise() {
+		return "true"
+	}
+	return "false"
+}
+
+// injectTraceParityHeaders 补齐官方 chat 的**单头**链路形态。
+//
+// 我们此前只有 X-B3-TraceId / SpanId / Sampled 三件套，而官方两版都是
+// 「B3 三件套 + X-B3-ParentSpanId + b3 单头 + traceparent」**同时**发——
+// 「只有三件套」在形态上与真机可区分。这里从 req 上已设好的 B3 值回读，
+// 保证同一请求内各头指向同一 trace/span，不另造 ID。
+func (c *Client) injectTraceParityHeaders(req *http.Request) {
+	traceID := req.Header.Get("X-B3-TraceId")
+	spanID := req.Header.Get("X-B3-SpanId")
+	if traceID == "" || spanID == "" {
+		return // 链路族未注入（非 chat 路径）：不补单头，避免造出无主的 trace
+	}
+	// ParentSpanId：官方每条 chat 都带，值是上一级 span 的 16 hex。网关没有真实
+	// span 树，取独立随机值——上游无法校验父子关系，但「缺这个头」本身可判别。
+	parentSpanID := session.NewMessageID()[:16]
+	req.Header.Set("X-B3-ParentSpanId", parentSpanID)
+	// b3 单头：trace-span-flags-parent。
+	req.Header.Set("b3", traceID+"-"+spanID+"-1-"+parentSpanID)
+	// traceparent（W3C）：要求 trace-id 恒 32 hex、span-id 恒 16 hex，形态不符时
+	// 宁可不发——发一个畸形 traceparent 比不发更可疑。
+	if len(traceID) == 32 && len(spanID) == 16 {
+		req.Header.Set("traceparent", "00-"+traceID+"-"+spanID+"-01")
+	}
+	// baggage：OTel W3CBaggagePropagator 序列化形态，**恒 4 成员**，两个 buddy 键
+	// 留空值（`buddyId=` 是客户端的真实形态，不是漏填）；两个 codebuddy.* 键与同
+	// 请求的会话头同值——头体不一致本身就是可判别形态。
+	req.Header.Set("baggage",
+		"buddyId=,buddyName=,codebuddy.session_id="+req.Header.Get("X-Conversation-ID")+
+			",codebuddy.conversation_request_id="+req.Header.Get("X-Conversation-Request-ID"))
+}
+
+// injectAcpConnectionID 注入 acp-connection-id。
+//
+// 官方把它列进标准出站头族（与 X-Conversation-ID / X-Conversation-Request-ID 同一批
+// 设置），值来自会话注册表的 acpConnectionId：每个 session 生成一次、同会话多轮复用、
+// 跨会话不同，且形态是 v7 时间有序 UUID（与 X-Conversation-ID 同为 `01a1815d-…`，
+// 只是值不同）。网关没有 ACP 连接层，按「同 (账号, 会话源) 稳定、与会话 ID 不同值」
+// 派生，语义与官方一致。
+func (c *Client) injectAcpConnectionID(req *http.Request, a *auth.Auth) {
+	if a == nil || a.UID == "" {
+		return
+	}
+	src := req.Header.Get("X-Conversation-Request-ID")
+	if src == "" {
+		src = req.Header.Get("X-Conversation-ID")
+	}
+	req.Header.Set("acp-connection-id", deriveAcpConnectionID(a.UID, src))
+}
+
+// deriveAcpConnectionID 按 (uid, 会话源) 稳定派生一个 v7 形态的 UUID 字符串。
+//
+// 形态对齐官方（8-4-4-4-12 且版本位 7、变体位 8..b）；时间戳段由哈希填充而不是
+// 真实时钟——本头只需「同会话稳定、跨会话不同」，上游不校验时间戳合理性。
+func deriveAcpConnectionID(uid, src string) string {
+	sum := sha256.Sum256([]byte("wb2a:acp:" + uid + ":" + src))
+	b := sum[:16]
+	b[6] = (b[6] & 0x0f) | 0x70 // version 7
+	b[8] = (b[8] & 0x3f) | 0x80 // variant RFC4122
+	h := hex.EncodeToString(b)
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
 }

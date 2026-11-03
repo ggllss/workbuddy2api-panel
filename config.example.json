@@ -51,7 +51,10 @@
     "client_name": "",
     "device_token": "",
     "device_token_file": "",
-    "passthrough_ip": false
+    "passthrough_ip": false,
+    "tls_fingerprint": "node",
+    "accept_encoding_parity": true,
+    "header_order": true
   },
   "features": {
     "sanitize_blacklist_fingerprints": true

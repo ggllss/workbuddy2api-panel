@@ -1,0 +1,242 @@
+// outbound.go 出站三件套的运行期档位与 RoundTripper 收口层。
+//
+// 三件事各带一个独立配置开关，都可热生效、可单独回滚：
+//   - upstream.tls_fingerprint         出站 ClientHello 档位（node 复刻 / go 原生），见 tlsfingerprint.go
+//   - upstream.accept_encoding_parity  Accept-Encoding 四段声明 + 响应解码收口（T2）
+//   - upstream.header_order            出站头名大小写与官方线上形态对齐（T3）
+//
+// 档位放 atomic 而不是构造期常量：线上一旦出现「换了指纹反而握手失败」，改配置后
+// 新连接立即用新档位，不必重启进程（回滚成本 = 一次配置保存）。
+package upstream
+
+import (
+	"bufio"
+	"compress/flate"
+	"compress/gzip"
+	"compress/zlib"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"sync/atomic"
+
+	"github.com/andybalholm/brotli"
+)
+
+// acceptEncodingParity 与官方客户端一致的 Accept-Encoding 四段声明。
+//
+// 一旦显式声明该头，net/http 的**透明解压自动关闭**——所有响应体都得自己解码，
+// 故本常量与 decodeResponseBody 成对出现：只发头不解码会让上层直接读到压缩字节。
+const acceptEncodingParity = "gzip, compress, deflate, br"
+
+// outboundTiers 出站三件套的运行期档位（atomic，拨号/请求时读取）。
+type outboundTiers struct {
+	fingerprint    atomic.Value // string：TLSFingerprintNode / TLSFingerprintGo
+	acceptEncoding atomic.Bool  // T2：Accept-Encoding 对齐 + 解码收口
+	headerOrder    atomic.Bool  // T3：头名大小写对齐
+}
+
+// newOutboundTiers 生产默认档位：三件全开（与 config 缺省一致）。
+func newOutboundTiers() *outboundTiers {
+	t := &outboundTiers{}
+	t.fingerprint.Store(TLSFingerprintNode)
+	t.acceptEncoding.Store(true)
+	t.headerOrder.Store(true)
+	return t
+}
+
+// fingerprintValue 当前指纹档位；nil 接收者按生产默认（node）处理，
+// 让「未接线的裸 Client」与「配置缺省」口径一致。
+func (t *outboundTiers) fingerprintValue() string {
+	if t == nil {
+		return TLSFingerprintNode
+	}
+	v, _ := t.fingerprint.Load().(string)
+	return v
+}
+
+// parityRoundTripper 出站 RoundTripper 收口层，架在 *http.Transport 之上：
+//
+//  1. T2：本次请求没带 Accept-Encoding 时按档位声明四段值；响应回来后按
+//     Content-Encoding 换解码 reader。**单一收口**——本仓 20 处生产代码直接读
+//     resp.Body（client.go 9 / desktop.go 3 / modelsdev.go 2 / global_register.go 2 /
+//     global_models.go 2 / panel/login.go 2），逐个改就有 20 个漏改点。
+//  2. T3：把官方线上小写形态的头名改写成小写键（见 alignHeaderCase）。
+//  3. CloseIdleConnections 透传给底层 Transport（roundTripCloseIdle 依赖）。
+type parityRoundTripper struct {
+	base  *http.Transport
+	tiers *outboundTiers
+}
+
+func newOutboundRoundTripper(base *http.Transport, tiers *outboundTiers) http.RoundTripper {
+	return &parityRoundTripper{base: base, tiers: tiers}
+}
+
+// CloseIdleConnections 让 roundTripCloseIdle 能透过包装层清池。
+func (p *parityRoundTripper) CloseIdleConnections() { p.base.CloseIdleConnections() }
+
+func (p *parityRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	parity := p.tiers != nil && p.tiers.acceptEncoding.Load()
+	alignCase := p.tiers != nil && p.tiers.headerOrder.Load()
+
+	// 只有「调用方原本没带 Accept-Encoding」时才由我们声明；显式带头的调用方
+	// 自己负责解码（与 net/http 的透明解压规则同源）。
+	// goDecodes 标记「Go 自己加 gzip 并透明解压」的老路径——那条路径上不能再套
+	// 解码层，否则会对已解压的 body 再解一次。
+	goDecodes := false
+	setParity := false
+	if req.Header.Get("Accept-Encoding") == "" {
+		if parity {
+			setParity = true
+		} else {
+			goDecodes = true
+		}
+	}
+
+	var out *http.Request
+	if setParity || alignCase {
+		out = cloneRequestWithHeaders(req)
+		if setParity {
+			out.Header.Set("Accept-Encoding", acceptEncodingParity)
+		}
+		if alignCase {
+			alignHeaderCase(out.Header)
+		}
+	} else {
+		out = req
+	}
+
+	resp, err := p.base.RoundTrip(out)
+	if err != nil || resp == nil || goDecodes {
+		return resp, err
+	}
+	if derr := decodeResponseBody(resp); derr != nil {
+		// 解码失败必须可见：关掉底流并让请求失败，绝不静默返回空 body
+		// （上层对空 body 只会报「JSON 解析失败」，把根因埋掉）。
+		resp.Body.Close()
+		return nil, derr
+	}
+	return resp, nil
+}
+
+// cloneRequestWithHeaders 浅拷贝请求 + 深拷贝 Header。
+// 直接改调用方的 req.Header 会与并发共享同一 req 的 goroutine 抢写。
+func cloneRequestWithHeaders(req *http.Request) *http.Request {
+	out := new(http.Request)
+	*out = *req
+	out.Header = req.Header.Clone()
+	return out
+}
+
+// decodeResponseBody 按 Content-Encoding 把 resp.Body 换成**流式**解码 reader。
+//
+// 全部用流式 reader（gzip.Reader / brotli.Reader / flate.Reader 都是边读边解），
+// 绝不 io.ReadAll——否则 SSE 的 TTFB 与「边收边推」语义一起丢。
+func decodeResponseBody(resp *http.Response) error {
+	enc := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding")))
+	if enc == "" || enc == "identity" {
+		// identity 不是变换：保持原 body 与原头，Uncompressed 也不置位。
+		return nil
+	}
+	body := resp.Body
+	var (
+		r       io.Reader
+		closers []io.Closer
+	)
+	switch enc {
+	case "gzip", "x-gzip":
+		zr, err := gzip.NewReader(body)
+		if err != nil {
+			return fmt.Errorf("gzip 解码初始化失败: %w", err)
+		}
+		r, closers = zr, []io.Closer{zr, body}
+	case "br":
+		// brotli.Reader 无 Close，且不预读整块：首字节即可解，适合 SSE。
+		r, closers = brotli.NewReader(body), []io.Closer{body}
+	case "deflate":
+		// deflate 有两种线上实现：RFC1950 zlib（带 2 字节头）与 RFC1951 raw flate，
+		// 服务端两种都有人用。按 zlib 头合法性嗅探前 2 字节决定，而不是赌一种。
+		br := bufio.NewReader(body)
+		if isZlibHeader(br) {
+			zr, err := zlib.NewReader(br)
+			if err != nil {
+				return fmt.Errorf("deflate(zlib) 解码初始化失败: %w", err)
+			}
+			r, closers = zr, []io.Closer{zr, body}
+		} else {
+			fr := flate.NewReader(br)
+			r, closers = fr, []io.Closer{fr, body}
+		}
+	default:
+		// 未知编码（含多段编码）：不动 body、不删头。上层能看到 Content-Encoding
+		// 与原始字节，比静默返回空/乱码可诊断。
+		return nil
+	}
+	resp.Body = &decodedBody{r: r, closers: closers}
+	// 与 net/http 透明解压后的形态一致：声明已解压、长度未知、去掉编码相关头，
+	// 避免上层按 Content-Length 预分配或按 Content-Encoding 二次解码。
+	resp.Uncompressed = true
+	resp.ContentLength = -1
+	resp.Header.Del("Content-Encoding")
+	resp.Header.Del("Content-Length")
+	return nil
+}
+
+// isZlibHeader 判断流首 2 字节是否 RFC1950 zlib 头：CM 必须为 8（deflate），
+// 且 (CMF<<8|FLG) 必须被 31 整除。
+func isZlibHeader(br *bufio.Reader) bool {
+	head, err := br.Peek(2)
+	if err != nil || len(head) < 2 {
+		return false
+	}
+	cmf, flg := uint16(head[0]), uint16(head[1])
+	return cmf&0x0f == 8 && (cmf<<8|flg)%31 == 0
+}
+
+// decodedBody 解码 reader + 关闭链（先关解码器再关底流）。
+type decodedBody struct {
+	r       io.Reader
+	closers []io.Closer
+}
+
+func (b *decodedBody) Read(p []byte) (int, error) { return b.r.Read(p) }
+
+func (b *decodedBody) Close() error {
+	var firstErr error
+	for _, c := range b.closers {
+		if err := c.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// officialLowercaseHeaders 官方线上用**小写头名**的头（Node/undici 按 JS 源码字面量
+// 写出，不做首字母大写规范化）。Go 的 Header.Set 会走 textproto.CanonicalMIMEHeaderKey
+// 强制首字母大写，要还原官方形态只能直接写 map 的非规范键。
+//
+// 只列本仓确实会发、且官方确认小写的头；没有真机证据的头不臆造。
+var officialLowercaseHeaders = []string{
+	// 官方 chat 真机为 x-codebuddy-request（HTTP 头名大小写不敏感，值等价）。
+	// 注意键必须写 Go 的**规范形**：textproto.CanonicalMIMEHeaderKey 会把
+	// "X-CodeBuddy-Request" 规范成 "X-Codebuddy-Request"（每个 '-' 后只大写首字母，
+	// 其余小写），Header.Set 存的就是后者；写错大小写会查不到、静默不生效。
+	"X-Codebuddy-Request",
+}
+
+// alignHeaderCase 把上述头名的键改写成官方小写形态（值不变）。
+// 已存在同名小写键时跳过——不把两处取值悄悄合并成一个。
+func alignHeaderCase(h http.Header) {
+	for _, canonical := range officialLowercaseHeaders {
+		vals, ok := h[canonical]
+		if !ok {
+			continue
+		}
+		lower := strings.ToLower(canonical)
+		if _, exists := h[lower]; exists {
+			continue
+		}
+		h[lower] = vals
+		delete(h, canonical)
+	}
+}

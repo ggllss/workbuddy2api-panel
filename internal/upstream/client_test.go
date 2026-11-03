@@ -482,9 +482,12 @@ func TestNewChatClientNoTotalTimeoutAndSharedTransport(t *testing.T) {
 	if c.ChatHTTP.Transport != c.HTTP.Transport {
 		t.Errorf("ChatHTTP and HTTP must share the same *http.Transport")
 	}
-	htr, ok := c.ChatHTTP.Transport.(*http.Transport)
-	if !ok {
-		t.Fatalf("Transport type=%T", c.ChatHTTP.Transport)
+	// 出站 Transport 现在被 T2 解码收口层包装（parityRoundTripper），故用
+	// UnwrapTransport 取底层 *http.Transport——直接类型断言会静默失败，
+	// 而「底层 Transport 的 ResponseHeaderTimeout 是否配上了」正是本测试要守的东西。
+	htr := UnwrapTransport(c.ChatHTTP.Transport)
+	if htr == nil {
+		t.Fatalf("UnwrapTransport(%T)=nil want *http.Transport", c.ChatHTTP.Transport)
 	}
 	if htr.ResponseHeaderTimeout != 60*time.Second { // 连接层加固：响应头上限从 120s 收到 60s（慢冷启动留 3.75× 余量）
 		t.Errorf("ResponseHeaderTimeout=%v want 60s", htr.ResponseHeaderTimeout)
