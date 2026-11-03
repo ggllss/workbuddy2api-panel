@@ -223,6 +223,10 @@ const (
 	taskKeepalive
 	taskBlackcat
 	taskGrowth
+	// taskBalance 余额后台刷新。它不走 nextWake 的小时制排程（独立 ticker，见
+	// StartBalanceRefresh），列在这里只是让 humanize.go 的抖动散列与其它任务共用
+	// 同一个 taskKind 口径（每个任务的偏移互不相同，同账号不会所有任务同一秒动）。
+	taskBalance
 )
 
 // nextWake 返回 now 之后最近的唤醒时刻，以及该时刻需要执行的全部任务。
