@@ -274,8 +274,12 @@ type ChatMeta struct {
 // meta 为会话头族元数据（纯新增，不改既有头），见 injectConversationHeaders。
 func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, meta ChatMeta) {
 	c.CommonHeaders(req, a)
-	// chat 流式 Accept 覆盖 CommonHeaders 的非流式默认（D6）。
-	req.Header.Set("Accept", "application/json, text/event-stream")
+	// Accept：**不做覆盖**，沿用 CommonHeaders 的 `application/json`。
+	//
+	// 此前这里覆盖成 `application/json, text/event-stream`（D6 的流式收窄），
+	// 但 2026-11-04 国际版 5.9.4 真机抓包（2/2 条 chat/completions）实测请求头
+	// 就是 `Accept: application/json`——响应虽然是 text/event-stream，请求侧并不声明。
+	// 用 event-stream 反而是一条与真机不符的差异。
 	// X-Requested-With：**只有 chat（SDK 链）带**，RPC 层不带（见 CommonHeaders 注释）。
 	// 真机按 UA 族切开后形态干净：chat 那条 10/10 带，RPC 各条 0/30 与 0/26。
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
@@ -560,13 +564,18 @@ func (c *Client) injectClientSDKHeaders(req *http.Request, a *auth.Auth) {
 
 // privateDataHeaderValue 出站 X-Private-Data 取值。
 //
-// 客户端逻辑：`resolveModelOptimizationEnabled() ? "false" : "true"`，其中
-// 企业版默认关模型优化 → "true"；个人号 → "false"（真机 7/7 条 chat 全是 false）。
+// 语义：`true` = 本次请求含私有数据（即**未开启**模型优化）。客户端逻辑是
+// `resolveModelOptimizationEnabled() ? "false" : "true"`，而「模型优化」默认关闭，
+// 所以默认发 "true"。
+//
+// 2026-11-04 国际版 5.9.4 真机抓包（个人号，2/2 条 chat/completions）实测恒为
+// `X-Private-Data: true`。此前本仓默认发 "false"（依据更早一次抓包记录的
+// "真机 7/7 条全是 false"），与这份更新的抓包不符——已按新证据改正。
+// 该值若与上游的模型优化开关不一致，本身就是一处可区分特征。
 func privateDataHeaderValue(a *auth.Auth) string {
-	if a != nil && a.IsEnterprise() {
-		return "true"
-	}
-	return "false"
+	// 企业版默认关模型优化，同样是 "true"；两版结论一致，故不再按 realm/企业版分叉。
+	_ = a
+	return "true"
 }
 
 // injectTraceParityHeaders 补齐官方 chat 的**单头**链路形态。

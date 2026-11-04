@@ -41,7 +41,7 @@ func TestChatHeadersSDKFamily(t *testing.T) {
 		"X-Agent-Type":                agentTypeMain,
 		"X-Agent-Intent":              agentIntentCraft,
 		"X-Agent-Runtime":             agentRuntimeLocal,
-		"X-Private-Data":              "false", // 个人号 = false（真机 7/7）
+		"X-Private-Data":              "true", // 个人号也是 true（2026-11-04 国际版 5.9.4 真机 2/2）
 	}
 	for k, v := range want {
 		if got := req.Header.Get(k); got != v {
@@ -50,8 +50,8 @@ func TestChatHeadersSDKFamily(t *testing.T) {
 	}
 }
 
-// TestChatHeadersPrivateDataEnterprise 企业版 X-Private-Data 取 "true"
-// （企业版默认关模型优化 → 声明不允许用于改进）。
+// TestChatHeadersPrivateDataEnterprise 企业版 X-Private-Data 同样取 "true"
+// （企业版默认关模型优化 → 声明不允许用于改进；个人号实测也是 true，两版一致）。
 func TestChatHeadersPrivateDataEnterprise(t *testing.T) {
 	c := New()
 	a := &auth.Auth{AccessToken: "at", UID: "u1", EnterpriseID: "e1"}

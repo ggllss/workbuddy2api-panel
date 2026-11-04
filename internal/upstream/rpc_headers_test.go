@@ -64,6 +64,16 @@ func TestChatHeadersCarryXRWButNotBrowserOrigin(t *testing.T) {
 	if got := req.Header.Get("X-IDE-Name"); got != "WorkBuddy" {
 		t.Errorf("chat X-IDE-Name=%q want WorkBuddy", got)
 	}
+	// Accept：2026-11-04 国际版 5.9.4 真机抓包（2/2 条 chat/completions）实测请求头是
+	// `Accept: application/json`——响应虽是 text/event-stream，请求侧并不声明。
+	// 曾经覆盖成 `application/json, text/event-stream`，那是一条与真机不符的差异。
+	if got := req.Header.Get("Accept"); got != "application/json" {
+		t.Errorf("chat Accept=%q want application/json（真机请求侧不声明 event-stream）", got)
+	}
+	// X-Private-Data：同批真机 2/2 条为 true（个人号也如此）。
+	if got := req.Header.Get("X-Private-Data"); got != "true" {
+		t.Errorf("chat X-Private-Data=%q want true（真机 2/2）", got)
+	}
 }
 
 // TestChatHeadersDropPreexistingOrigin 防御性断言：即使调用方在 ChatHeaders 之前
