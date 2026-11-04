@@ -12,6 +12,9 @@
 package upstream
 
 import (
+	"bytes"
+	"compress/gzip"
+	"io"
 	"net/http"
 	"testing"
 
@@ -122,5 +125,77 @@ func TestDeviceHeadersSwitchRestores(t *testing.T) {
 
 	if req.Header.Get("X-Machine-ID") == "" || req.Header.Get("X-Session-ID") == "" {
 		t.Error("device_headers=true 时应当注入 X-Machine-ID / X-Session-ID")
+	}
+}
+
+// TestRequestGzipAboveThreshold 请求体超过阈值时压成 gzip 并补 Content-Encoding。
+//
+// 真机依据：官方对大请求体发 Content-Encoding: gzip（2458B 未压、48841B 已压、
+// 另 13 条 53K–80K 全压）。这里同时钉住「压缩后能解回原文」和「GetBody 也换过」，
+// 后者漏了会在重试时发出「未压缩体 + gzip 声明」的坏请求。
+func TestRequestGzipAboveThreshold(t *testing.T) {
+	c := New()
+	c.SetRequestGzipMinBytes(16384)
+	body := bytes.Repeat([]byte("a"), 40000)
+	req, _ := http.NewRequest(http.MethodPost, "https://www.workbuddy.ai/v2/chat/completions", bytes.NewReader(body))
+	c.maybeCompressRequest(req, body)
+
+	if got := req.Header.Get("Content-Encoding"); got != "gzip" {
+		t.Fatalf("Content-Encoding=%q want gzip", got)
+	}
+	if req.ContentLength >= int64(len(body)) {
+		t.Errorf("压缩后 ContentLength=%d 应小于原始 %d", req.ContentLength, len(body))
+	}
+	got, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("读压缩体: %v", err)
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(got))
+	if err != nil {
+		t.Fatalf("gzip.NewReader: %v", err)
+	}
+	plain, err := io.ReadAll(zr)
+	if err != nil {
+		t.Fatalf("解压: %v", err)
+	}
+	if !bytes.Equal(plain, body) {
+		t.Error("解压结果与原文不一致")
+	}
+	// GetBody 必须也指向压缩体，否则重试会发坏请求。
+	gb, err := req.GetBody()
+	if err != nil || gb == nil {
+		t.Fatalf("GetBody 未设置: %v", err)
+	}
+	gbBytes, _ := io.ReadAll(gb)
+	if !bytes.Equal(gbBytes, got) {
+		t.Error("GetBody 返回的不是压缩体（重试会发出未压缩体 + gzip 声明）")
+	}
+}
+
+// TestRequestGzipBelowThreshold 小请求体不压缩（真机 2458B 那条没有 Content-Encoding）。
+func TestRequestGzipBelowThreshold(t *testing.T) {
+	c := New()
+	c.SetRequestGzipMinBytes(16384)
+	body := bytes.Repeat([]byte("a"), 2000)
+	req, _ := http.NewRequest(http.MethodPost, "https://www.workbuddy.ai/v2/chat/completions", bytes.NewReader(body))
+	c.maybeCompressRequest(req, body)
+
+	if got := req.Header.Get("Content-Encoding"); got != "" {
+		t.Errorf("小请求体不该压缩，Content-Encoding=%q", got)
+	}
+	if req.ContentLength != int64(len(body)) {
+		t.Errorf("ContentLength=%d want %d", req.ContentLength, len(body))
+	}
+}
+
+// TestRequestGzipDisabled 阈值 0 = 关闭，即使超大请求体也不压。
+func TestRequestGzipDisabled(t *testing.T) {
+	c := New()
+	c.SetRequestGzipMinBytes(0)
+	body := bytes.Repeat([]byte("a"), 100000)
+	req, _ := http.NewRequest(http.MethodPost, "https://www.workbuddy.ai/v2/chat/completions", bytes.NewReader(body))
+	c.maybeCompressRequest(req, body)
+	if got := req.Header.Get("Content-Encoding"); got != "" {
+		t.Errorf("关闭时不该压缩，Content-Encoding=%q", got)
 	}
 }

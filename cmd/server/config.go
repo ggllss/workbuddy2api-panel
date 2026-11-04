@@ -178,6 +178,14 @@ type Config struct {
 		// 「每账号一台虚拟设备」指纹，多发即一处可识别差异。留开关仅用于 CN 侧
 		// 拿到反证时恢复。
 		DeviceHeaders bool `json:"device_headers"`
+		// RequestGzipMinBytes 请求体 gzip 压缩阈值（字节）。热生效。
+		//
+		// 官方客户端对大请求体发 `Content-Encoding: gzip`。真机抓包夹逼：
+		// 2458 B 未压缩、48841 B 已压缩、另 13 条 53K–80K 全部压缩，故阈值落在
+		// (2458, 48841] 之间无法再精确。取 16384：两个已观测端点都成立。
+		//
+		// 取值语义：**键缺席 = 默认 16384；显式 0 或负值 = 关闭压缩**。
+		RequestGzipMinBytes int `json:"request_gzip_min_bytes"`
 		// EgressBackoff 出口级退避（默认 true）：把「链路瞬时抖动」类失败（传输错误 /
 		// 上游 5xx / 读 body 失败）记在**出口**上、只做 1s→15s 秒级退避，不再逐个账号
 		// 进分钟级熔断。账号自身问题（401/403/429/额度耗尽/内容拦截）照旧罚号。
@@ -354,6 +362,8 @@ func Default() *Config {
 	c.Upstream.TLSFingerprint = "node"
 	c.Upstream.AcceptEncodingParity = true
 	c.Upstream.HeaderOrder = true
+	// 请求体 gzip 阈值默认 16384（0/缺席走这里；负值才是显式关闭）。
+	c.Upstream.RequestGzipMinBytes = 16384
 	// 出口级退避默认开：链路抖动不该连坐账号（关掉 = 回到「逐账号分钟级熔断」旧行为）。
 	c.Upstream.EgressBackoff = true
 	c.Upstream.EgressBackoffMaxSeconds = 15

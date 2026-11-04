@@ -11,6 +11,7 @@ package upstream
 
 import (
 	"bufio"
+	"bytes"
 	"compress/flate"
 	"compress/gzip"
 	"compress/zlib"
@@ -41,6 +42,14 @@ type outboundTiers struct {
 	// 自行发明的「每账号一台虚拟设备」指纹，官方客户端并不发。多发即差异，
 	// 故默认关闭；留开关只为在 CN 侧拿到反证时能一键恢复。
 	deviceHeaders atomic.Bool
+	// requestGzipMin 请求体 gzip 压缩阈值（字节，**0 = 关闭**）。默认 16384。
+	//
+	// 官方客户端对大请求体发 `Content-Encoding: gzip`。真机抓包夹逼结果：
+	// 2458 B 未压缩、48841 B 已压缩，另 13 条 53K–80K 全部压缩——阈值落在
+	// (2458, 48841] 之间，无法再精确（官方可能取 4K/8K/16K/32K 任一）。
+	// 取 16384：对「小请求不压、大请求压」两个已观测端点都成立。
+	// 我们的真实流量普遍远大于此（26 万 token 级），故取值差异实际不可见。
+	requestGzipMin atomic.Int64
 }
 
 // newOutboundTiers 生产默认档位：三件全开（与 config 缺省一致）+ 设备头默认关。
@@ -50,7 +59,40 @@ func newOutboundTiers() *outboundTiers {
 	t.acceptEncoding.Store(true)
 	t.headerOrder.Store(true)
 	t.deviceHeaders.Store(false)
+	t.requestGzipMin.Store(16384)
 	return t
+}
+
+// maybeCompressRequest 按阈值把请求体换成 gzip 并补 Content-Encoding。
+//
+// 只在 chat 链路调用（官方只对大的 chat 请求体压缩；小的 RPC 请求未压缩）。
+// 压缩失败一律**不动**原 body——宁可少一个头，也不能把请求发坏。
+func (c *Client) maybeCompressRequest(req *http.Request, body []byte) {
+	if c == nil || c.out == nil || req == nil {
+		return
+	}
+	min := c.out.requestGzipMin.Load()
+	if min <= 0 || int64(len(body)) < min {
+		return
+	}
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write(body); err != nil {
+		_ = zw.Close()
+		return
+	}
+	if err := zw.Close(); err != nil {
+		return
+	}
+	compressed := buf.Bytes()
+	req.Body = io.NopCloser(bytes.NewReader(compressed))
+	req.ContentLength = int64(len(compressed))
+	// GetBody 必须一起替换：重定向/重试时 Go 用它重放 body，若仍指向未压缩的
+	// 原始 reader，会发出「未压缩体 + Content-Encoding: gzip」的坏请求。
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(compressed)), nil
+	}
+	req.Header.Set("Content-Encoding", "gzip")
 }
 
 // fingerprintValue 当前指纹档位；nil 接收者按生产默认（node）处理，

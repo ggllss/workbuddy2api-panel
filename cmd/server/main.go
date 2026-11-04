@@ -172,6 +172,7 @@ func main() {
 	up.SetAcceptEncodingParity(cfg.Upstream.AcceptEncodingParity)
 	up.SetHeaderOrder(cfg.Upstream.HeaderOrder)
 	up.SetDeviceHeaders(cfg.Upstream.DeviceHeaders)
+	up.SetRequestGzipMinBytes(int64(cfg.Upstream.RequestGzipMinBytes))
 	// global realm 路由（config global 段）：上游侧开关（第一道闸）+ base 覆盖；
 	// auth 侧开关（auth.SetGlobalEnabled）是第二道闸，两者同 config global.enabled。
 	up.GlobalEnabled = cfg.Global.Enabled
@@ -531,6 +532,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, cost *usage.Prici
 	up.SetAcceptEncodingParity(newCfg.Upstream.AcceptEncodingParity)
 	up.SetHeaderOrder(newCfg.Upstream.HeaderOrder)
 	up.SetDeviceHeaders(newCfg.Upstream.DeviceHeaders)
+	up.SetRequestGzipMinBytes(int64(newCfg.Upstream.RequestGzipMinBytes))
 	// 当日花费单价热生效（下一个请求即用新价）；不进 restartRequiredFields。
 	cost.Store(newCfg.CostPricing())
 	// 出口退避热生效（不进 restartRequiredFields）：关掉时 Configure 会顺手清空

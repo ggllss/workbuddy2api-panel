@@ -57,6 +57,7 @@
     "accept_encoding_parity": true,
     "header_order": true,
     "device_headers": false,
+    "request_gzip_min_bytes": 16384,
     "egress_backoff": true,
     "egress_backoff_max_seconds": 15
   },

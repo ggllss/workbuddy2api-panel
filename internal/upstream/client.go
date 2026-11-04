@@ -772,6 +772,20 @@ func (c *Client) SetDeviceHeaders(on bool) {
 	c.out.deviceHeaders.Store(on)
 }
 
+// SetRequestGzipMinBytes 设置请求体 gzip 压缩阈值（字节，<=0 = 关闭）。热生效。
+//
+// 官方客户端对大请求体发 Content-Encoding: gzip（真机夹逼：2458B 不压、
+// 48841B 已压）。阈值具体值无法从抓包精确确定，故做成可配置。
+func (c *Client) SetRequestGzipMinBytes(n int64) {
+	if c.out == nil {
+		return
+	}
+	if n < 0 {
+		n = 0
+	}
+	c.out.requestGzipMin.Store(n)
+}
+
 // closeIdleConnections 清掉两个 client 的空闲连接池（best-effort）。
 func (c *Client) closeIdleConnections() {
 	for _, cl := range []*http.Client{c.HTTP, c.ChatHTTP} {
@@ -1112,6 +1126,9 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		if err != nil {
 			return nil, 0, nil, err
 		}
+		// 大请求体按官方形态 gzip（真机 48841B/53K–80K 全部压缩，2458B 未压）。
+		// 必须在 NewRequest 之后、Do 之前：替换 Body 并补 Content-Encoding。
+		c.maybeCompressRequest(req, prepared)
 		c.ChatHeaders(req, a, clientIP, meta)
 		// 从调用方 ctx 派生：保留取消传播（父 ctx 取消 → 本 ctx 取消），
 		// 同时 monitorBody.Close 仍能独立 cancel 本分支（空闲掐流）。
