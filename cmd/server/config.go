@@ -110,6 +110,17 @@ type Config struct {
 		// 解冻语义同签到（余额 > 0 的冷却账号自动解冻），但不做签到不刷 token。
 		BalanceRefreshEnabled bool `json:"balance_refresh_enabled"` // 缺省 true；false = 关闭
 		BalanceRefreshMinutes int  `json:"balance_refresh_minutes"` // 缺省 5；<=0 回落 5
+
+		// JitterSeconds 定时任务的**按账号稳定**抖动窗口（秒，0 = 关闭，缺省 120）。
+		//
+		// 没有它时所有账号在同一分钟一起打上游（签到 09:00、活跃上报 10:00、旅行
+		// 09:00），是本仓风控复盘里最显眼的机器特征。抖动由
+		// scheduler/humanize.go 按 (任务, 上游自然日, uid) 散列派生：同一账号同一天
+		// 偏移恒定（可复现、可排障），且恒 < 窗口，不会跨到下一个周期。
+		//
+		// 只作用于**排程**触发；面板手动按钮 / Run*Now 传零值 start，恒零延迟。
+		// 热生效（atomic），不进 restartRequiredFields。
+		JitterSeconds int `json:"jitter_seconds"`
 	} `json:"schedule"`
 
 	Global struct {
@@ -324,6 +335,9 @@ func Default() *Config {
 	c.Schedule.BlackcatEnabled = true
 	c.Schedule.BalanceRefreshEnabled = true
 	c.Schedule.BalanceRefreshMinutes = 5
+	// 抖动窗口缺省 120s：12 个账号摊在窗口内平均 10s 一个，已完全打散「同一秒」
+	// 的形状；相对最小任务周期（余额刷新 5 分钟）留 2.5 倍余量（见 humanize.go）。
+	c.Schedule.JitterSeconds = 120
 	c.Upstream.TimeoutSeconds = 120
 	// HeaderTimeoutSeconds/IdleTimeoutSeconds 默认 0（未设置态），回落见 normalize()。
 	c.Upstream.HeaderTimeoutSeconds = 0
@@ -702,6 +716,15 @@ func (c *Config) normalize() error {
 			c.Schedule.BalanceRefreshMinutes = 5
 		}
 		c.BalanceRefreshInterval = time.Duration(c.Schedule.BalanceRefreshMinutes) * time.Minute
+	}
+	// 抖动窗口钳制：负值 = 关闭（等价 0，不报错——用户想关掉抖动时填 -1 与填 0
+	// 意图相同，报错只会多一轮往返）；上限 900s（15 分钟）——再大就会吃掉余额
+	// 刷新周期（默认 5 分钟）的整数倍，且签到/旅行这类 12h 周期的收益早已饱和。
+	if c.Schedule.JitterSeconds < 0 {
+		c.Schedule.JitterSeconds = 0
+	}
+	if c.Schedule.JitterSeconds > 900 {
+		c.Schedule.JitterSeconds = 900
 	}
 	// 当日花费单价（元 / 百万 tokens）：负数 fail fast，**不**静默钳 0。
 	//

@@ -385,6 +385,7 @@ curl -sN http://localhost:7863/v1/chat/completions \
 | `schedule.keepalive_enabled` | `true` | token 保活总开关 |
 | `schedule.blackcat_enabled` | `true` | 夜猫子总开关 |
 | `schedule.include_disabled_in_tasks` | `false` | 让**保号类**四任务（签到 / 活跃上报 / token 保活 / 余额刷新）对**已禁用**账号也执行——「禁用」只关选号，不停保号。`false`（默认）保持「禁用的跳过」 |
+| `schedule.jitter_seconds` | `120` | 定时任务的**按账号稳定**抖动窗口（秒）。排程触发时每个账号在自己「任务+自然日+uid」派生的固定偏移上开始（同一账号同一天偏移恒定、恒小于窗口），避免全部账号同一秒打上游这一机器特征。`0` = 关闭（逐字恢复旧行为）；负值按 0 处理，上限 900。只作用于排程，面板手动按钮 / 「立即执行」零延迟；热生效无需重启 |
 | `upstream.timeout_seconds` | `120` | 短 RPC（刷新 / 签到 / 余额 / 模型列表）总时长上限 |
 | `upstream.header_timeout_seconds` | 回落 `timeout_seconds` | 聊天首字节前（响应头）上限 |
 | `upstream.idle_timeout_seconds` | `300` | 聊天流中空闲上限（活跃续命，静默断流） |

@@ -3,6 +3,7 @@
 package scheduler
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"time"
@@ -46,7 +47,13 @@ func travelDay(t time.Time) string {
 // 领奖 + 领养前置上报），不发模型对话，与「让位防风控」不冲突；
 // 401/查询失败只跳过该账号本轮（不强刷 token，交 22:00 keepalive）；
 // 账号间限速 travelAccountDelay。
-func (s *Scheduler) RunTravelNow() {
+//
+// 手动入口：start 传零值 → 不抖动、立即执行（面板按钮行为完全不变）。
+func (s *Scheduler) RunTravelNow() { s.runTravel(context.Background(), time.Time{}) }
+
+// runTravel 旅行巡检遍历。start 为批次计划触发时刻：非零时按账号加稳定抖动，
+// 避免所有账号同一秒打上游；零值 = 手动立即执行，不抖动。
+func (s *Scheduler) runTravel(ctx context.Context, start time.Time) {
 	first := true
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled {
@@ -61,6 +68,11 @@ func (s *Scheduler) RunTravelNow() {
 		}
 		if a.IsEnterprise() {
 			continue // 企业版门控：无成长体系（/activity/growth/* 上游一律 403），不发起任何上游调用
+		}
+		// 抖动插入点：廉价过滤之后、账号间限速与第一次上游调用（travelOne 内的
+		// buddy-info）之前。放在限速**之前**，first/travelAccountDelay 逐字不动。
+		if !s.sleepJitter(ctx, start, taskTravel, st.UID) {
+			return // 优雅停机：剩余账号下轮再跑
 		}
 		if !first {
 			time.Sleep(travelAccountDelay)

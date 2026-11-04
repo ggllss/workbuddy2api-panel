@@ -399,6 +399,11 @@ func (s *Scheduler) Run(ctx context.Context) {
 // runBatch 并行派发一批任务（同一唤醒时刻的多类任务），等全部完成返回。
 // ctx 取消时由各任务内部的可取消等待快速收尾。
 func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) {
+	// 批次起点：抖动偏移按「批次计划触发时刻 + 该账号稳定偏移」生效，而不是「每账号
+	// 再固定睡多久」——串行遍历时前面账号的耗时已消耗掉一部分窗口，按「还差多少」
+	// 算才不会把批次总时长撑成 账号数 × 窗口（12 个号的签到不该拖成十几分钟）。
+	// 窗口为 0 时下游一律零延迟，这里多取一次 time.Now() 无副作用。
+	start := time.Now()
 	var wg sync.WaitGroup
 	for _, k := range kinds {
 		wg.Add(1)
@@ -406,11 +411,15 @@ func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) {
 			defer wg.Done()
 			switch k {
 			case taskCheckin:
-				s.RunCheckinNow()
+				s.runCheckin(ctx, start)
 			case taskTravel:
-				s.RunTravelNow()
+				s.runTravel(ctx, start)
 			case taskActivity:
-				s.runActivity(ctx)
+				s.runActivity(ctx, start)
+			// keepalive / blackcat / growth 本轮**不接抖动**：keepalive 每天 1 次、
+			// blackcat/growth 主要靠面板按钮与成长队列触发（量小，且面板触发本就该
+			// 立即执行），同一秒撞车的机器特征收益不足以抵消改动面。
+			// humanize.go 的 kindKey 已备好这三个键，接线时改一行即可。
 			case taskKeepalive:
 				s.RunKeepaliveNow()
 			case taskBlackcat:
@@ -451,7 +460,20 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 // 旅行已从签到剥离为独立排程（travel_hours），不再搭签到便车。
 // 末尾追加连登管家（streak.go）：可兑换档位自动兑换 + 抽奖次数自动抽完——
 // 连登兑换按天数解锁，挂在每日签到后即「到天数那天自动完成兑换→抽奖闭环」。
-func (s *Scheduler) RunCheckinNow() {
+//
+// 手动入口：start 传零值 → 不抖动、立即执行（面板按钮行为完全不变）。
+func (s *Scheduler) RunCheckinNow() { s.runCheckin(context.Background(), time.Time{}) }
+
+// runCheckin 签到遍历。start 为批次计划触发时刻：非零时按账号加稳定抖动，
+// 避免所有账号同一秒打上游；零值 = 手动立即执行，不抖动。
+//
+// 抖动插入点：所有**廉价过滤之后**（disabled / AuthByUID 或 refresh token 缺失 /
+// IsGlobal）、**第一次上游调用之前**。放在过滤之前会把窗口浪费在被跳过的账号上；
+// 放在上游调用之后则抖动毫无意义（请求已经发出去了）。
+//
+// ctx 取消时直接 return 而不是 continue：取消只来自优雅停机，剩余账号下轮再跑；
+// 末尾的 RunStreakBonusNow 一并跳过——停机途中不该再起连登兑换/抽奖那一串上游调用。
+func (s *Scheduler) runCheckin(ctx context.Context, start time.Time) {
 	expiringSoon := s.ExpiringSoonWindow()
 	includeDisabled := s.includeDisabledInTasks()
 	for _, st := range s.cfg.Pool.List() {
@@ -467,6 +489,9 @@ func (s *Scheduler) RunCheckinNow() {
 		// 按 CN 处理——这是逃生门的刻意语义（纯 CN 部署锁死一切 global），与引用处一致。
 		if a.IsGlobal() {
 			continue
+		}
+		if !s.sleepJitter(ctx, start, taskCheckin, st.UID) {
+			return
 		}
 		// 企业版无签到体系：上游对 POST /v2/billing/meter/daily-checkin 直接
 		// 400 code 10001「企业账号不支持该操作」。跳过签到，但**不 continue**——
@@ -508,14 +533,15 @@ func (s *Scheduler) RunCheckinNow() {
 // code=0 OK，点亮连登）；一条上报同时点亮 growth 连登 + 解锁 first_buddy 任务。
 // 上报成功后续跑 streak 自检（checkActivityStreak）：回读连登天数，发现
 // 「上报 200 但 streak 没涨」的静默丢弃（只读 oracle，不做重试）。
-// RunActivityNow 是无 ctx 的外部入口（面板/测试一次性触发）；排程主循环走
-// runActivity（ctx 取消时立即放弃剩余账号，不等限速睡满）。
+// RunActivityNow 是无 ctx 的外部入口（面板/测试一次性触发，start 零值 = 不抖动）；
+// 排程主循环走 runActivity（ctx 取消时立即放弃剩余账号，不等限速睡满）。
 func (s *Scheduler) RunActivityNow() {
-	s.runActivity(context.Background())
+	s.runActivity(context.Background(), time.Time{})
 }
 
 // runActivity 活跃上报遍历，随 ctx 取消立即退出。
-func (s *Scheduler) runActivity(ctx context.Context) {
+// start 为批次计划触发时刻：非零时按账号加稳定抖动；零值 = 手动立即执行，不抖动。
+func (s *Scheduler) runActivity(ctx context.Context, start time.Time) {
 	first := true
 	includeDisabled := s.includeDisabledInTasks()
 	for _, st := range s.cfg.Pool.List() {
@@ -538,6 +564,13 @@ func (s *Scheduler) runActivity(ctx context.Context) {
 		// 无需改动 upstream。此处曾按「D4 门控：global 无活跃体系」跳过 global，实测该
 		// 判断不成立——国际版 /v2/report 可用，跳过即国际版账号永远点不亮连登（上游
 		// a190252 同口径修复）。checkin/travel 的 global 门控不受影响，仍跳过。
+		//
+		// 抖动插入点：廉价过滤（disabled / 无 AccessToken / 企业版）之后、账号间
+		// 限速与第一次上游调用（ReportChatActivity）之前。放在限速**之前**是为了
+		// 让 first/travelAccountDelay 这套限速逻辑逐字不动。
+		if !s.sleepJitter(ctx, start, taskActivity, st.UID) {
+			return // 优雅停机：剩余账号下轮再报
+		}
 		if !first {
 			if !sleepCtx(ctx, activityAccountDelay) {
 				return // 优雅停机：不等限速睡满，剩余账号下轮再报

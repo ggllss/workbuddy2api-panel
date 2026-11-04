@@ -202,6 +202,9 @@ func main() {
 		// 保号类四任务是否覆盖禁用账号（缺省 false = 禁用即跳过，保持既有行为）。
 		IncludeDisabledInTasks: cfg.Schedule.IncludeDisabledInTasks,
 	})
+	// 排程抖动的启动期初值（热改见 saveConfig 里的同名调用）：0 = 逐字旧行为，
+	// 即所有账号仍在同一秒打上游。
+	sch.SetJitterWindow(time.Duration(cfg.Schedule.JitterSeconds) * time.Second)
 	switch {
 	case !cfg.Schedule.CheckinEnabled:
 		log.Printf("签到已禁用（schedule.checkin_enabled=false）")
@@ -552,6 +555,9 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, cost *usage.Prici
 		!newCfg.Schedule.GrowthEnabled)
 	sch.SetBalanceInterval(newCfg.BalanceRefreshInterval)
 	sch.SetIncludeDisabledInTasks(newCfg.Schedule.IncludeDisabledInTasks)
+	// 排程抖动窗口热生效（不进 restartRequiredFields）：窗口是 atomic，下一次
+	// 批次唤醒即按新值派生偏移；改 0 = 立刻回到「同一秒一起打上游」的旧行为。
+	sch.SetJitterWindow(time.Duration(newCfg.Schedule.JitterSeconds) * time.Second)
 
 	return restartRequiredFields(newCfg), nil
 }
