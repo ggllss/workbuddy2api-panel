@@ -118,7 +118,7 @@ func (c *Client) ReportDesktopEvent(a *auth.Auth, events ...DesktopEvent) error 
 	req.Header.Set("User-Agent", desktopUA)
 	req.Header.Set("X-Domain", c.desktopBase(a))
 	req.Header.Set("X-Product", "SaaS")
-	req.Header.Set("X-Request-ID", deriveID(a, "req")+fmt.Sprintf("%d", time.Now().UnixNano()%1e6))
+	req.Header.Set("X-Request-ID", newRequestID())
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
 	}
@@ -446,7 +446,7 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	h.Set("X-Product", "SaaS")
 	h.Set("X-User-Id", a.UID)
 	h.Set("X-Conversation-ID", conversationID)
-	h.Set("X-Request-ID", fmt.Sprintf("%d", time.Now().UnixNano()))
+	h.Set("X-Request-ID", newRequestID())
 	h.Set("X-Agent-Intent", "craft")
 	h.Set("X-Agent-Type", "main")
 	h.Set("X-IDE-Name", "WorkBuddy")

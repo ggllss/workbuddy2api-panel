@@ -115,11 +115,17 @@ func (c *Client) injectDeviceToken(req *http.Request, a *auth.Auth) {
 	}
 }
 
-// deriveAccountStableID 按 uid + 用途盐稳定派生 36 hex 设备/会话标识。
+// deriveAccountStableID 按 uid + 用途盐稳定派生「UUIDv4 形态」的设备/会话标识。
 // 跨重启稳定（固定盐 "wb2a:"，不随进程换——这是与 session 包派生盐的本质差异：
 // 那是会话键维度的进程级随机盐，重启换新；本函数是账号维度，必须跨重启恒定）、
 // 账号间互异（uid 不同则不同）、同 uid 同用途恒同值（幂等）。用 sha256 与项目
-// 既有派生（session/ids.go、cache_key.go）保持一致；截 36 hex 提供更长熵。
+// 既有派生（session/ids.go、cache_key.go）保持一致。
+//
+// **形态必须是带连字符的 UUIDv4**，不能是裸 hex：真实客户端的 machineId 取自
+// OS 硬件 UUID、sessionId 取自每进程一个 randomUUID，两者都是 8-4-4-4-12 的
+// 36 字符 UUID（版本位 4、变体位 10xx）。此前这里发的是 36 位无连字符 hex，
+// 形态与官方客户端对不上——**那本身就是一处可被识别的「网关特征」**
+// （参考实现 wb_fingerprint.py 同款结论：形态照抄、取值按账号派生）。
 //
 // 两个用途：
 //   - purpose="machine" → X-Machine-ID（设备级，跨会话稳定）
@@ -130,8 +136,29 @@ func (c *Client) injectDeviceToken(req *http.Request, a *auth.Auth) {
 // 防多号被上游按设备指纹缺失/漂移关联风控。两者是不同头族，官方桌面端都发。
 func deriveAccountStableID(uid, purpose string) string {
 	sum := sha256.Sum256([]byte("wb2a:" + purpose + ":" + uid))
-	return hex.EncodeToString(sum[:18]) // 36 hex chars
+	return uuidV4Shape(hex.EncodeToString(sum[:16])) // 32 hex → 8-4-4-4-12
 }
+
+// uuidV4Shape 把 32 位 hex 渲染成带连字符的 UUIDv4 形态（36 字符）：
+// 版本位（第 13 字符）固定 4、变体位（第 17 字符）固定 a，与真实客户端的
+// machineId / sessionId 同形。入参不足 32 hex 时原样返回（不 panic、不伪造）。
+func uuidV4Shape(h string) string {
+	if len(h) < 32 {
+		return h
+	}
+	b := []byte(h[:32])
+	b[12] = '4' // 版本位
+	b[16] = 'a' // 变体位（10xx → 小写 a）
+	return string(b[0:8]) + "-" + string(b[8:12]) + "-" + string(b[12:16]) + "-" +
+		string(b[16:20]) + "-" + string(b[20:32])
+}
+
+// newRequestID 生成 X-Request-ID：32 位随机 hex，**与账号无关**。
+//
+// 真实客户端的请求 id 每条独立随机；掺账号派生前缀（本仓此前 desktop.go 的
+// deriveID(a,"req")+微秒）会让每个请求自带「我是哪个账号的网关客户端」的稳定
+// 标记，是一条可追踪的网关特征，也是把请求串成序列的关联键。
+func newRequestID() string { return session.NewMessageID() }
 
 // injectAccountStableHeaders 在 req 注入 X-Machine-ID / X-Session-ID：按 uid 稳定
 // 派生，跨重启固定、账号间互异。uid 为空时不注入（匿名请求无设备标识，上游不要求）。
