@@ -537,6 +537,11 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, cost *usage.Prici
 	up.SetHeaderSequence(newCfg.Upstream.HeaderSequence)
 	up.SetDeviceHeaders(newCfg.Upstream.DeviceHeaders)
 	up.SetRequestGzipMinBytes(int64(newCfg.Upstream.RequestGzipMinBytes))
+	// 注意：upstream.device_token / device_token_file 是**启动期**装配（普通 string 字段，
+	// 每请求读），不能在热路径里写——那会与并发请求构成数据竞争。它们已在
+	// restartRequiredFields 里，面板保存时会提示需要重启。
+	// 但 device_token_file 指向的**文件内容**是每请求读 + 5 分钟缓存，自动跟随刷新：
+	// 桌面端 token 轮换不需要重启网关，只有改路径才需要。
 	// 当日花费单价热生效（下一个请求即用新价）；不进 restartRequiredFields。
 	cost.Store(newCfg.CostPricing())
 	// 出口退避热生效（不进 restartRequiredFields）：关掉时 Configure 会顺手清空
@@ -589,6 +594,14 @@ func restartRequiredFields(c *Config) []string {
 	// 之后不再读取——不在 livecfg 热快照里，也无法热改。此前漏列，导致面板改完
 	// 显示"已保存"却不提示需要重启，用户以为没生效（issue #102 附带发现 2）。
 	out = append(out, "upstream.user_agent")
+	// upstream.device_token / device_token_file 同理：都是**启动期**装配进
+	// upstream.Client 的普通字段（main.go 的 up.DeviceToken = ...），每请求直接读，
+	// 不能热写（会与并发请求构成数据竞争）。面板改完必须提示重启，否则同样是
+	// 「显示已保存却没生效」。
+	//
+	// 注意区别：device_token_file 指向的**文件内容**是每请求读 + 5 分钟缓存，
+	// 桌面端 token 轮换会自动跟随，不需要重启网关；只有改**路径**才需要。
+	out = append(out, "upstream.device_token", "upstream.device_token_file")
 	if c.Upstash.URL != "" || c.Upstash.Token != "" {
 		out = append(out, "upstash")
 	}
