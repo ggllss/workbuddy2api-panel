@@ -364,6 +364,11 @@ func TestHeaderOrderWireBytes(t *testing.T) {
 		c := New()
 		defer c.closeIdleConnections()
 		c.SetHeaderOrder(on)
+		// 隔离本开关：header_sequence（默认开）会连顺序与全量大小写一起对齐，
+		// 不关掉就测不出 header_order 单独的作用。两者在大小写上语义重叠：
+		// header_order 是历史的部分开关（只列 x-codebuddy-request），
+		// header_sequence 按官方表做全量顺序+拼写。
+		c.SetHeaderSequence(false)
 		req, _ := http.NewRequest(http.MethodPost, "http://"+ln.Addr().String()+"/v2/chat/completions", strings.NewReader("{}"))
 		req.Header.Set("X-CodeBuddy-Request", "1")
 		req.Header.Set("User-Agent", "ua")

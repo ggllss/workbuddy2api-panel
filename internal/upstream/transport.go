@@ -85,10 +85,35 @@ func newDialer() *net.Dialer {
 //     TLSClientConfig 不再生效，握手超时与 ServerName 由 tlsHandshake 自行保证。
 //   - TLSNextProto 仍必须非 nil 的 make：复刻档位不带 ALPN，但回滚到 go 档位时
 //     crypto/tls 默认会经 ALPN 协商 h2，空映射是「任何档位都禁 h2」的兜底。
+//
+// wrapHeadOrderDial 给明文 HTTP 拨号结果按开关包上 headOrderConn。
+//
+// TLS 路径由 newTLSDialer 自己包（它拿的是裸 conn），这里只覆盖 http:// 形态。
+// 开关在**拨号时**读取：改配置后需要清空闲池才会对存量连接生效，Client 的
+// SetHeaderSequence 已经做了这件事。
+func wrapHeadOrderDial(dial func(ctx context.Context, network, addr string) (net.Conn, error), tiers *outboundTiers) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		conn, err := dial(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		if tiers.headerSequenceEnabled() {
+			return newHeadOrderConn(conn), nil
+		}
+		return conn, nil
+	}
+}
+
 func newTransport(tiers *outboundTiers) *http.Transport {
 	dialer := newDialer()
 	return &http.Transport{
-		DialContext: dialer.DialContext,
+		// 明文 HTTP 也包装：生产全走 https（DialTLSContext），但 config
+		// global.chat_base / billing_base 允许指向 http 网关（自建反代、本地联调），
+		// 那条路径原本完全不受 headorder 管——头顺序在 http 下仍是 Go 字母序，
+		// 等于「同一份配置两种出站形态」。这里补齐，两种 base 形态一致。
+		// 不会与 TLS 路径重复包装：newTLSDialer 内部直接调 dialer.DialContext，
+		// 拿的是裸 conn，不经过本函数。
+		DialContext: wrapHeadOrderDial(dialer.DialContext, tiers),
 		// DialTLSContext 接管整条 TLS 拨号：见函数注释。
 		DialTLSContext: newTLSDialer(dialer, tiers),
 		// 空 TLSNextProto（非 nil）真正禁 h2：见函数注释。必须 make 而非 nil——
