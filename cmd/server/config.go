@@ -171,6 +171,13 @@ type Config struct {
 		AcceptEncodingParity bool `json:"accept_encoding_parity"`
 		// HeaderOrder 出站头名大小写与官方线上形态对齐（默认 true）。热生效。
 		HeaderOrder bool `json:"header_order"`
+		// DeviceHeaders 是否发 X-Machine-ID / X-Session-ID（**默认 false**）。热生效。
+		//
+		// 官方客户端（国际版 5.9.4，46 条请求真机抓包，覆盖 chat/report/busy/
+		// v3-config/billing/telemetry）**不发**这两个头——它们是本仓自行发明的
+		// 「每账号一台虚拟设备」指纹，多发即一处可识别差异。留开关仅用于 CN 侧
+		// 拿到反证时恢复。
+		DeviceHeaders bool `json:"device_headers"`
 		// EgressBackoff 出口级退避（默认 true）：把「链路瞬时抖动」类失败（传输错误 /
 		// 上游 5xx / 读 body 失败）记在**出口**上、只做 1s→15s 秒级退避，不再逐个账号
 		// 进分钟级熔断。账号自身问题（401/403/429/额度耗尽/内容拦截）照旧罚号。

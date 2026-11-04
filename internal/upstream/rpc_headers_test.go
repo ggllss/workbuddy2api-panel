@@ -93,3 +93,34 @@ func TestChatHeadersDropPreexistingOrigin(t *testing.T) {
 		t.Errorf("ChatHeaders 应清掉调用方预设的 Referer，got %q", got)
 	}
 }
+
+// TestChatHeadersOmitInventedHeaders 钉住「官方不发、本仓曾多发」的三个头。
+//
+// 2026-11-04 国际版 5.9.4 真机抓包（46 条请求，覆盖 chat/report/busy/v3-config/
+// billing/telemetry）里：x-machine-id 0 次、x-session-id 0 次、
+// x-no-enterprise-id 0 次；accept-language 17 次但**全在 telemetry/billing/collect**，
+// chat 上 0 次。多发任何一个都是可识别差异。
+func TestChatHeadersOmitInventedHeaders(t *testing.T) {
+	a := &auth.Auth{UID: "u1", AccessToken: "at"}
+	req, _ := http.NewRequest(http.MethodPost, "https://www.workbuddy.ai/v2/chat/completions", nil)
+	New().ChatHeaders(req, a, "", ChatMeta{})
+
+	for _, k := range []string{"X-Machine-ID", "X-Session-ID", "X-No-Enterprise-Id", "Accept-Language"} {
+		if got := req.Header.Get(k); got != "" {
+			t.Errorf("chat 不该带 %s，got %q（官方真机 0 次）", k, got)
+		}
+	}
+}
+
+// TestDeviceHeadersSwitchRestores 设备头开关打开后恢复注入（保留回滚能力）。
+func TestDeviceHeadersSwitchRestores(t *testing.T) {
+	c := New()
+	c.SetDeviceHeaders(true)
+	a := &auth.Auth{UID: "u1", AccessToken: "at"}
+	req, _ := http.NewRequest(http.MethodPost, "https://www.workbuddy.ai/v2/chat/completions", nil)
+	c.ChatHeaders(req, a, "", ChatMeta{})
+
+	if req.Header.Get("X-Machine-ID") == "" || req.Header.Get("X-Session-ID") == "" {
+		t.Error("device_headers=true 时应当注入 X-Machine-ID / X-Session-ID")
+	}
+}

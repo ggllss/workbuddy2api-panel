@@ -761,6 +761,17 @@ func (c *Client) SetHeaderOrder(on bool) {
 	c.out.headerOrder.Store(on)
 }
 
+// SetDeviceHeaders 切换是否发 X-Machine-ID / X-Session-ID（T4，默认关）。
+//
+// 官方客户端（国际版 5.9.4，46 条请求抓包）**不发**这两个头，本仓自行发明的
+// 「每账号一台虚拟设备」指纹属于多发。开关保留以便 CN 侧出现反证时恢复。
+func (c *Client) SetDeviceHeaders(on bool) {
+	if c.out == nil {
+		return
+	}
+	c.out.deviceHeaders.Store(on)
+}
+
 // closeIdleConnections 清掉两个 client 的空闲连接池（best-effort）。
 func (c *Client) closeIdleConnections() {
 	for _, cl := range []*http.Client{c.HTTP, c.ChatHTTP} {

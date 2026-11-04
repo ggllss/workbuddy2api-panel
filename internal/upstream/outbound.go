@@ -34,14 +34,22 @@ type outboundTiers struct {
 	fingerprint    atomic.Value // string：TLSFingerprintNode / TLSFingerprintGo
 	acceptEncoding atomic.Bool  // T2：Accept-Encoding 对齐 + 解码收口
 	headerOrder    atomic.Bool  // T3：头名大小写对齐
+	// deviceHeaders T4：是否发 X-Machine-ID / X-Session-ID。**默认关**。
+	//
+	// 2026-11-04 国际版 5.9.4 真机抓包（46 条请求、覆盖 chat/report/busy/
+	// v3-config/billing/telemetry）里这两个头**一次都没出现**——它们是本仓
+	// 自行发明的「每账号一台虚拟设备」指纹，官方客户端并不发。多发即差异，
+	// 故默认关闭；留开关只为在 CN 侧拿到反证时能一键恢复。
+	deviceHeaders atomic.Bool
 }
 
-// newOutboundTiers 生产默认档位：三件全开（与 config 缺省一致）。
+// newOutboundTiers 生产默认档位：三件全开（与 config 缺省一致）+ 设备头默认关。
 func newOutboundTiers() *outboundTiers {
 	t := &outboundTiers{}
 	t.fingerprint.Store(TLSFingerprintNode)
 	t.acceptEncoding.Store(true)
 	t.headerOrder.Store(true)
+	t.deviceHeaders.Store(false)
 	return t
 }
 

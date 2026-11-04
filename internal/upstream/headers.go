@@ -200,7 +200,15 @@ func newRequestID() string { return session.NewMessageID() }
 
 // injectAccountStableHeaders 在 req 注入 X-Machine-ID / X-Session-ID：按 uid 稳定
 // 派生，跨重启固定、账号间互异。uid 为空时不注入（匿名请求无设备标识，上游不要求）。
+//
+// **默认不注入**（config upstream.device_headers 缺省 false）。2026-11-04 国际版
+// 5.9.4 真机抓包 46 条请求（chat / report / busy / v3-config / billing / telemetry）
+// 里这两个头一次都没出现——它们是本仓自行发明的「每账号一台虚拟设备」指纹，
+// 官方客户端并不发，多发就是一处可识别差异。开关保留以便 CN 侧出现反证时恢复。
 func (c *Client) injectAccountStableHeaders(req *http.Request, a *auth.Auth) {
+	if c == nil || c.out == nil || !c.out.deviceHeaders.Load() {
+		return
+	}
 	if a == nil || a.UID == "" {
 		return
 	}
@@ -334,6 +342,16 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 	c.injectClientSDKHeaders(req, a)
 	c.injectTraceParityHeaders(req)
 	c.injectAcpConnectionID(req, a)
+
+	// 收尾清理：两个官方 chat **不发**、但本仓上游各注入点会设的头。
+	// 必须放在**所有注入之后**——X-No-Enterprise-Id 由 injectGlobalChatHeaders
+	// 在 CN/global 两条分支上设置，放在函数前半段会被它重新写回来（踩过）。
+	//
+	//   Accept-Language：官方 chat 不带（同一份 46 条抓包里它出现 17 次，
+	//     全在 telemetry / billing / collect 路径，chat 上 0 次）。
+	//   X-No-Enterprise-Id：官方全量抓包 0 次（含 global 个人号），是自造头。
+	req.Header.Del("Accept-Language")
+	req.Header.Del("X-No-Enterprise-Id")
 }
 
 // injectGlobalChatHeaders global 账号（无企业 ID）的 chat 专属声明头，对齐 intl 项目
