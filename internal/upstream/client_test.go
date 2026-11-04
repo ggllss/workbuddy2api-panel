@@ -278,8 +278,10 @@ func TestChatStreamSendsHeadersAndStreamTrue(t *testing.T) {
 		t.Errorf("200 response should carry nil body, got %q", respBody)
 	}
 	rc.Close()
-	if gotAuth != "Bearer at" || gotUID != "u1" || gotProduct != "WorkBuddy" {
-		t.Errorf("headers: auth=%q uid=%q product=%q", gotAuth, gotUID, gotProduct)
+	// X-Product 恒为 "SaaS"（官方全量头：X-Product: SaaS + X-IDE-Name/Type: WorkBuddy）。
+	// 此前这里断言 "WorkBuddy"，那是与真机不一致的旧行为。
+	if gotAuth != "Bearer at" || gotUID != "u1" || gotProduct != "SaaS" {
+		t.Errorf("headers: auth=%q uid=%q product=%q（X-Product 应为 SaaS）", gotAuth, gotUID, gotProduct)
 	}
 	if !bytes.Contains(gotBody, []byte(`"stream":true`)) {
 		t.Errorf("stream not forced: %s", gotBody)

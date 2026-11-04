@@ -214,10 +214,22 @@ func (c *Client) CommonHeaders(req *http.Request, a *auth.Auth) {
 	// Accept 非流式默认 application/json（D6：去掉宽松的 text/plain, */*）。
 	// chat 流式路径在 ChatHeaders 覆盖为 event-stream。
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	origin := originRefererFor(a)
-	req.Header.Set("Origin", origin)
-	req.Header.Set("Referer", origin+"/")
+	// X-Requested-With / Origin / Referer：**RPC 层一律不发**。
+	//
+	// 真机证据（参考实现 2026-10-30 全量扫描，1182 条 flow / 125 条路径，按 UA 族切开）：
+	//
+	//	UA workbuddy-ai/…                        → 无 XRW（30/30）  ← RPC 层（node fetch）
+	//	UA WorkBuddy/<ver> WorkBuddy/<ver> CLI/… → 无 XRW（26/26）  ← CN 的 RPC 层
+	//	UA WorkBuddy/<ver> <slug>/<ver> CLI/…    → 有 XRW（10/10）  ← 渲染器侧另一条链
+	//
+	// 即「带不带 XRW」由**哪条代码路径发的**决定，不是按 realm 切。本函数服务 RPC 层
+	// （refresh / report / busy / console-as / user-asset / portal / billing），恒不带；
+	// chat 那条（SDK 链）由 ChatHeaders 自己补。
+	//
+	// Origin/Referer 同理：桌面端 RPC 是 node fetch，没有浏览器同源语义，真机这些路径
+	// 一律不带（refresh / v3-config / chat / busy / report 逐头确认）。旧实现在这里塞
+	// Origin+Referer，等于给每个 RPC 请求盖一个浏览器痕迹，**反而不是客户端形态**。
+	// 需要浏览器语义的调用方（登录页 / web 层 / growth 页 / profile 页）各自显式设置。
 	req.Header.Set("User-Agent", c.userAgent(a))
 	// X-CodeBuddy-Request: 1（官方客户端风控闸门头，所有 API 请求必带，D1）。
 	req.Header.Set("X-CodeBuddy-Request", "1")
@@ -264,6 +276,13 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 	c.CommonHeaders(req, a)
 	// chat 流式 Accept 覆盖 CommonHeaders 的非流式默认（D6）。
 	req.Header.Set("Accept", "application/json, text/event-stream")
+	// X-Requested-With：**只有 chat（SDK 链）带**，RPC 层不带（见 CommonHeaders 注释）。
+	// 真机按 UA 族切开后形态干净：chat 那条 10/10 带，RPC 各条 0/30 与 0/26。
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	// Origin/Referer：chat 是 node fetch，不带浏览器同源头（真机逐头确认）。
+	// 显式 Del 是防御性的——若调用方在 ChatHeaders 之前已设过，这里要清掉。
+	req.Header.Del("Origin")
+	req.Header.Del("Referer")
 	// AccessToken 加锁快照：keepalive 定时刷新会在 a.mu 内改写它，锁外直读构成数据竞争
 	// （见 auth.AccessTokenValue 注释）。
 	if at := a.AccessTokenValue(); at != "" {
@@ -413,7 +432,12 @@ func (c *Client) injectAttribution(req *http.Request, a *auth.Auth) {
 	req.Header.Set("X-IDE-Name", name)
 	req.Header.Set("X-IDE-Type", name)
 	req.Header.Set("X-IDE-Version", c.clientVersionFor(a))
-	req.Header.Set("X-Product", name)
+	// X-Product **恒为 "SaaS"**，与 X-IDE-* 分开取值——这是官方全量头纠正过的形态：
+	//
+	//	国际版出站：X-Product: SaaS  X-IDE-Name: WorkBuddy  X-IDE-Type: WorkBuddy  X-IDE-Version: 5.9.4
+	//
+	// 此前这里跟随 clientName 取 "WorkBuddy"，与真机不一致——等于多留了一处可识别的差异。
+	req.Header.Set("X-Product", "SaaS")
 }
 
 // injectClientIP 在 PassthroughIP 开启时把 clientIP 参数透传给上游（三等价头）。
