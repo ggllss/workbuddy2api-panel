@@ -114,7 +114,23 @@ func newTLSDialer(d *net.Dialer, tiers *outboundTiers) func(context.Context, str
 		if err != nil {
 			return nil, err
 		}
-		return tlsHandshake(ctx, raw, addr, nil, tiers.fingerprintValue())
+		conn, err := tlsHandshake(ctx, raw, addr, nil, tiers.fingerprintValue())
+		if err != nil {
+			return nil, err
+		}
+		// 头顺序重排的包装点：**TLS 之上**（包裹的是已解密的 net.Conn）。
+		//
+		// 必须在这一层而不是 DialContext 层，两个原因：
+		//   1. 本仓用 DialTLSContext 接管整条 TLS 拨号，http.Transport 根本不会走
+		//      DialContext 建 https 连接——在 DialContext 里包等于永远不生效。
+		//   2. 重排的对象是**明文**请求头字节。包在 TLS 之下（裸 TCP）就只能看到
+		//      加密记录，既改不了头，还会把 TLS 记录层写坏。
+		// 档位在拨号时读取：关掉开关后新建的连接不再包装，池里的旧连接由
+		// Client.SetHeaderSequence 清空（与 SetTLSFingerprint 同款处理）。
+		if tiers.headerSequenceEnabled() {
+			return newHeadOrderConn(conn), nil
+		}
+		return conn, nil
 	}
 }
 

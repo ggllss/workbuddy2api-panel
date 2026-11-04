@@ -761,6 +761,22 @@ func (c *Client) SetHeaderOrder(on bool) {
 	c.out.headerOrder.Store(on)
 }
 
+// SetHeaderSequence 切换出站请求头**发送顺序**对齐官方（conn 层重排字节）。
+//
+// 包装与否在拨号时决定（见 newTLSDialer），所以切换后要清空空闲连接池：池里的
+// 连接是按旧档位建的，不清就会被下一个请求继续复用，表现为「开关改了但线上顺序
+// 没变」。只关空闲连接，不影响在途请求（与 SetTLSFingerprint 同款处理）。
+func (c *Client) SetHeaderSequence(on bool) {
+	if c.out == nil {
+		return
+	}
+	if c.out.headerSequence.Load() == on {
+		return
+	}
+	c.out.headerSequence.Store(on)
+	c.closeIdleConnections()
+}
+
 // SetDeviceHeaders 切换是否发 X-Machine-ID / X-Session-ID（T4，默认关）。
 //
 // 官方客户端（国际版 5.9.4，46 条请求抓包）**不发**这两个头，本仓自行发明的

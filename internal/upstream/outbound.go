@@ -4,6 +4,7 @@
 //   - upstream.tls_fingerprint         出站 ClientHello 档位（node 复刻 / go 原生），见 tlsfingerprint.go
 //   - upstream.accept_encoding_parity  Accept-Encoding 四段声明 + 响应解码收口（T2）
 //   - upstream.header_order            出站头名大小写与官方线上形态对齐（T3）
+//   - upstream.header_sequence         出站请求头发送顺序对齐官方（conn 层重排）
 //
 // 档位放 atomic 而不是构造期常量：线上一旦出现「换了指纹反而握手失败」，改配置后
 // 新连接立即用新档位，不必重启进程（回滚成本 = 一次配置保存）。
@@ -35,6 +36,12 @@ type outboundTiers struct {
 	fingerprint    atomic.Value // string：TLSFingerprintNode / TLSFingerprintGo
 	acceptEncoding atomic.Bool  // T2：Accept-Encoding 对齐 + 解码收口
 	headerOrder    atomic.Bool  // T3：头名大小写对齐
+	// headerSequence 出站请求头**发送顺序**对齐官方（见 headorder.go /
+	// headorder_conn.go）。默认开。
+	//
+	// 与 headerOrder 是两件事：那个管头名大小写（RoundTripper 层改 map key），
+	// 这个管行的先后（conn 层重排字节），两者互不依赖。
+	headerSequence atomic.Bool
 	// deviceHeaders T4：是否发 X-Machine-ID / X-Session-ID。**默认关**。
 	//
 	// 2026-11-04 国际版 5.9.4 真机抓包（46 条请求、覆盖 chat/report/busy/
@@ -58,6 +65,7 @@ func newOutboundTiers() *outboundTiers {
 	t.fingerprint.Store(TLSFingerprintNode)
 	t.acceptEncoding.Store(true)
 	t.headerOrder.Store(true)
+	t.headerSequence.Store(true)
 	t.deviceHeaders.Store(false)
 	t.requestGzipMin.Store(16384)
 	return t
@@ -103,6 +111,14 @@ func (t *outboundTiers) fingerprintValue() string {
 	}
 	v, _ := t.fingerprint.Load().(string)
 	return v
+}
+
+// headerSequenceEnabled 是否重排出站请求头顺序；nil 接收者按生产默认（开）处理。
+func (t *outboundTiers) headerSequenceEnabled() bool {
+	if t == nil {
+		return true
+	}
+	return t.headerSequence.Load()
 }
 
 // parityRoundTripper 出站 RoundTripper 收口层，架在 *http.Transport 之上：

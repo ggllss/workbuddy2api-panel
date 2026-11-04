@@ -171,6 +171,7 @@ func main() {
 	}
 	up.SetAcceptEncodingParity(cfg.Upstream.AcceptEncodingParity)
 	up.SetHeaderOrder(cfg.Upstream.HeaderOrder)
+	up.SetHeaderSequence(cfg.Upstream.HeaderSequence)
 	up.SetDeviceHeaders(cfg.Upstream.DeviceHeaders)
 	up.SetRequestGzipMinBytes(int64(cfg.Upstream.RequestGzipMinBytes))
 	// global realm 路由（config global 段）：上游侧开关（第一道闸）+ base 覆盖；
@@ -531,6 +532,9 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, cost *usage.Prici
 	}
 	up.SetAcceptEncodingParity(newCfg.Upstream.AcceptEncodingParity)
 	up.SetHeaderOrder(newCfg.Upstream.HeaderOrder)
+	// 头顺序重排（conn 层）热生效：包装与否在拨号时决定，setter 会在值变化时清
+	// 空闲连接池，避免「开关改了但池里旧连接继续按老档位发」。
+	up.SetHeaderSequence(newCfg.Upstream.HeaderSequence)
 	up.SetDeviceHeaders(newCfg.Upstream.DeviceHeaders)
 	up.SetRequestGzipMinBytes(int64(newCfg.Upstream.RequestGzipMinBytes))
 	// 当日花费单价热生效（下一个请求即用新价）；不进 restartRequiredFields。

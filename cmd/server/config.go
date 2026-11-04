@@ -171,6 +171,14 @@ type Config struct {
 		AcceptEncodingParity bool `json:"accept_encoding_parity"`
 		// HeaderOrder 出站头名大小写与官方线上形态对齐（默认 true）。热生效。
 		HeaderOrder bool `json:"header_order"`
+		// HeaderSequence 出站请求头**发送顺序**对齐官方（默认 true）。热生效。
+		//
+		// Go 的 net/http 按 map key 字母序写头，官方客户端（Node/undici）按代码
+		// 插入序写——这是与官方最后一项结构性差异。开关打开时在 conn 层重排头块
+		// 字节（见 internal/upstream/headorder*.go），只对顺序表里有抓包证据的
+		// 路径（目前 /v2/chat/completions）生效，其余路径保持 Go 原生顺序。
+		// 关掉 = 完全回到字母序（逃生门：重排属 conn 层介入，留一键回滚）。
+		HeaderSequence bool `json:"header_sequence"`
 		// DeviceHeaders 是否发 X-Machine-ID / X-Session-ID（**默认 false**）。热生效。
 		//
 		// 官方客户端（国际版 5.9.4，46 条请求真机抓包，覆盖 chat/report/busy/
@@ -362,6 +370,7 @@ func Default() *Config {
 	c.Upstream.TLSFingerprint = "node"
 	c.Upstream.AcceptEncodingParity = true
 	c.Upstream.HeaderOrder = true
+	c.Upstream.HeaderSequence = true
 	// 请求体 gzip 阈值默认 16384（0/缺席走这里；负值才是显式关闭）。
 	c.Upstream.RequestGzipMinBytes = 16384
 	// 出口级退避默认开：链路抖动不该连坐账号（关掉 = 回到「逐账号分钟级熔断」旧行为）。

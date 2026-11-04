@@ -56,6 +56,7 @@
     "tls_fingerprint": "node",
     "accept_encoding_parity": true,
     "header_order": true,
+    "header_sequence": true,
     "device_headers": false,
     "request_gzip_min_bytes": 16384,
     "egress_backoff": true,
