@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -140,33 +141,28 @@ func TestNonChatModelGenerationTags(t *testing.T) {
 	}
 }
 
-// TestDesktopUAForGlobalAccount 桌面端 UA 按 realm 切平台段：global 账号必须是
-// `WorkBuddy AI`（送错平台段会触发上游 403 code=11140 风控）。探测主路用这个 UA，
-// 与 chat 路径同源——global 目录探测因此拿到客户端同款模型集。
+// TestDesktopUAForGlobalAccount 桌面端 UA 按 realm 切第二段品牌：global 账号必须是
+// 官方 slug `workbuddy-ai`（送错品牌段会触发上游 403 code=11140 风控）。探测主路用
+// 这个 UA，与 chat 路径同源——global 目录探测因此拿到客户端同款模型集。
 func TestDesktopUAForGlobalAccount(t *testing.T) {
 	c := New()
 	global := &auth.Auth{UID: "u1", Domain: "www.workbuddy.ai"}
 	global.BackfillRealm()
 	ua := c.defaultWorkBuddyUAFor(global)
-	if want := "WorkBuddy AI"; !contains(ua, want) {
-		t.Errorf("global desktop UA = %q, want it to contain %q", ua, want)
+	if want := "WorkBuddy/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0"; ua != want {
+		t.Errorf("global desktop UA = %q want %q", ua, want)
 	}
-	if !contains(ua, "CLI/") {
-		t.Errorf("global desktop UA = %q, want CLI segment", ua)
+	// 旧实现写的是带空格的 `WorkBuddy AI`，会让 UA 变 4 段——钉住这个坑。
+	if strings.Contains(ua, "WorkBuddy AI") {
+		t.Errorf("global desktop UA = %q, must not contain 'WorkBuddy AI'（空格分隔出第 4 段）", ua)
 	}
-	// CN 账号保持 WorkBuddy（零回归）。
+	if n := len(strings.Fields(ua)); n != 3 {
+		t.Errorf("global desktop UA = %q, fields=%d want 3", ua, n)
+	}
+	// CN 账号保持驼峰 WorkBuddy。
 	cn := &auth.Auth{UID: "u2", Domain: "copilot.tencent.com"}
 	cn.BackfillRealm()
-	if ua := c.defaultWorkBuddyUAFor(cn); contains(ua, "WorkBuddy AI") {
-		t.Errorf("cn desktop UA = %q, must not contain 'WorkBuddy AI'", ua)
+	if ua := c.defaultWorkBuddyUAFor(cn); ua != "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0" {
+		t.Errorf("cn desktop UA = %q want WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0", ua)
 	}
-}
-
-func contains(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }

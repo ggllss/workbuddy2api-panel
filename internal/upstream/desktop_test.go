@@ -40,8 +40,9 @@ func TestReportDesktopEventFingerprint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("report desktop: %v", err)
 	}
-	if gotUA != desktopUA {
-		t.Errorf("UA=%q want %q", gotUA, desktopUA)
+	// 桌面域 UA 与 chat 链路同源：CN 账号 → 官方 CN 三段式（5.9.3 / CLI 2.165.0）。
+	if gotUA != "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0" {
+		t.Errorf("UA=%q want WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0", gotUA)
 	}
 	if len(got) != 1 {
 		t.Fatalf("events=%d want 1", len(got))
@@ -102,8 +103,8 @@ func TestSetAppearanceTheme(t *testing.T) {
 		if r.URL.Path != "/v2/user-asset/appearance/set" {
 			t.Errorf("path=%s want /v2/user-asset/appearance/set", r.URL.Path)
 		}
-		if r.Header.Get("User-Agent") != desktopUA {
-			t.Errorf("UA=%q want desktop UA", r.Header.Get("User-Agent"))
+		if got := r.Header.Get("User-Agent"); got != "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0" {
+			t.Errorf("UA=%q want WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0", got)
 		}
 		raw, _ := io.ReadAll(r.Body)
 		json.Unmarshal(raw, &got)
