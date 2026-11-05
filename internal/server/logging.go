@@ -469,9 +469,11 @@ func (o *responseObserver) Unwrap() http.ResponseWriter { return o.ResponseWrite
 // 是为了让 stdout 里成百上千行能竖着扫——否则模型名长短不一、中文昵称按字节补空格
 // 错位，根本没法用肉眼对齐着一列列看（这正是上一版 11 字节硬截断要解决的问题）。
 const (
-	// chatModelWidth 覆盖 realm 前缀 + 最长模型名："global:" (7) + "deepseek-v4.1-flash" (19) = 26。
-	// 旧的 11 字节截断会把 "cn:deepseek-v4-flash" 切成 "cn:deepseek"，让人误以为是另一个模型。
-	chatModelWidth = 26
+	// chatModelWidth 覆盖 realm 前缀 + 最长模型名 + 产品通道后缀：
+	// "global:" (7) + "deepseek-v4.1-flash" (19) + "@cb" (3) = 29，取 30 留余量。
+	// 旧的 11 字节截断会把 "cn:deepseek-v4-flash" 切成 "cn:deepseek"，让人误以为是另一个模型；
+	// 26 字节则会把 "@cb" 后缀整个切掉——两个产品通道在日志里变得无法区分（2026-11-05 实测）。
+	chatModelWidth = 30
 	// chatAcctWidth 容纳 "昵称(uid8)"：中文昵称按 2 列/字算，5 字中文 + "(xxxxxxxx)" = 20 列。
 	chatAcctWidth = 22
 	chatTTFBWidth = 8
