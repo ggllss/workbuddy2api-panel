@@ -1427,23 +1427,45 @@ function autoCandSync() {
     box.innerHTML = '<div style="color:var(--ink-3);font-size:12.5px">尚未选择候选模型：auto:all 请求将返回 400。</div>';
     return;
   }
-  // 组号按「首次出现顺序」标注：同身份的行共享同一个组号。
-  const groupNo = new Map();
-  grouped.forEach((g, gi) => g.members.forEach(m => groupNo.set(m, gi + 1)));
+  // 一组一行：同组（去掉域后同名）的成员并在同一行展示，上下移/移除都作用于整组。
   const needsReorder = autoCandState.some((m, i) => m !== flat[i]);
   const hint = needsReorder
     ? '<div style="color:var(--warn);font-size:12px;margin-bottom:4px">保存时会按分组重排（同模型的行会被归到一起）</div>'
     : '';
-  box.innerHTML = hint + autoCandState.map((m, i) =>
-    '<div style="display:flex;align-items:center;gap:6px;padding:3px 0">' +
-    '<span class="tag" style="min-width:34px;text-align:center">组' + groupNo.get(m) + '</span>' +
-    '<code style="flex:1;overflow-wrap:anywhere">' + esc(m) + '</code>' +
-    '<button type="button" class="xs" data-act="up" data-i="' + i + '"' + (i === 0 ? ' disabled' : '') + '>↑</button>' +
-    '<button type="button" class="xs" data-act="down" data-i="' + i + '"' + (i === autoCandState.length - 1 ? ' disabled' : '') + '>↓</button>' +
-    '<button type="button" class="xs" data-act="del" data-i="' + i + '">移除</button>' +
+  const arrow = ' style="color:var(--ink-3);margin:0 4px"';
+  box.innerHTML = hint + grouped.map((g, gi) =>
+    '<div style="display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px solid var(--line-soft)">' +
+    '<span class="tag" style="min-width:38px;text-align:center">组' + (gi + 1) + '</span>' +
+    '<code style="flex:1;overflow-wrap:anywhere">' +
+      g.members.map(m => esc(m)).join('<span' + arrow + '>+</span>') +
+    '</code>' +
+    '<span style="color:var(--ink-3);font-size:12px;min-width:46px;text-align:right">' + g.members.length + ' 个通道</span>' +
+    '<button type="button" class="xs" data-act="gup" data-g="' + gi + '"' + (gi === 0 ? ' disabled' : '') + '>↑</button>' +
+    '<button type="button" class="xs" data-act="gdown" data-g="' + gi + '"' + (gi === grouped.length - 1 ? ' disabled' : '') + '>↓</button>' +
+    '<button type="button" class="xs" data-act="gdel" data-g="' + gi + '">移除组</button>' +
     '</div>').join('') +
     '<div class="hint" style="margin-top:6px;font-size:12px">组内是同一模型的不同域通道，调用时按账号可用性均匀轮转；' +
-    '整组都不可用才降级到下一组。</div>';
+    '整组都不可用才降级到下一组。要增删组内某个通道，用上方勾选清单。</div>';
+}
+
+/* autoCandMoveGroup 整组上移/下移：在分组视图里交换后回写扁平列表。
+   扁平列表始终按「分组顺序」存放，这样后端扁平化后组块天然相邻。 */
+function autoCandMoveGroup(gi, dir) {
+  const groups = autoCandGrouped();
+  const to = gi + dir;
+  if (to < 0 || to >= groups.length) return;
+  const tmp = groups[gi];
+  groups[gi] = groups[to];
+  groups[to] = tmp;
+  autoCandState = groups.flatMap(g => g.members);
+}
+
+/* autoCandRemoveGroup 移除整组（其全部成员）。 */
+function autoCandRemoveGroup(gi) {
+  const groups = autoCandGrouped();
+  if (gi < 0 || gi >= groups.length) return;
+  groups.splice(gi, 1);
+  autoCandState = groups.flatMap(g => g.members);
 }
 
 function renderAutoCandPick() {
@@ -1479,14 +1501,12 @@ async function loadAutoCandModels() {
 $('autoCandList').addEventListener('click', ev => {
   const b = ev.target.closest('button[data-act]');
   if (!b) return;
-  const i = Number(b.dataset.i);
-  if (b.dataset.act === 'up' && i > 0) {
-    [autoCandState[i - 1], autoCandState[i]] = [autoCandState[i], autoCandState[i - 1]];
-  } else if (b.dataset.act === 'down' && i < autoCandState.length - 1) {
-    [autoCandState[i + 1], autoCandState[i]] = [autoCandState[i], autoCandState[i + 1]];
-  } else if (b.dataset.act === 'del') {
-    autoCandState.splice(i, 1);
-  } else return;
+  const act = b.dataset.act;
+  const gi = Number(b.dataset.g);
+  if (act === 'gup') autoCandMoveGroup(gi, -1);
+  else if (act === 'gdown') autoCandMoveGroup(gi, 1);
+  else if (act === 'gdel') autoCandRemoveGroup(gi);
+  else return;
   autoCandSync();
   renderAutoCandPick();
 });

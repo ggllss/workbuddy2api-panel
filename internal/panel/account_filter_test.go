@@ -85,3 +85,39 @@ func TestAccountReasonNoteTruncated(t *testing.T) {
 		}
 	}
 }
+
+// TestAutoGroupFrontendWiring 候选分组前端接线：一组一行 + 整组上下移/移除。
+//
+// 背景：分组是后端语义（auto.groups），但用户看到的必须是「一组一行」——
+// 逐行展示会让同组通道散落在列表各处，看不出轮转关系。
+func TestAutoGroupFrontendWiring(t *testing.T) {
+	js, err := os.ReadFile("app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(js)
+	for _, want := range []string{
+		"function autoCandGrouped",     // 按身份稳定分组
+		"function autoCandFlatGrouped", // 扁平化（保存用）
+		"function autoCandMoveGroup",   // 整组上移/下移
+		"function autoCandRemoveGroup", // 整组移除
+		`data-act="gup"`,               // 组级按钮
+		`data-act="gdown"`,
+		`data-act="gdel"`,
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("app.js 缺少 %s（候选分组未接线）", want)
+		}
+	}
+	// 身份判定必须剥掉 realm 前缀，否则同模型的不同域通道分不到一组。
+	if !strings.Contains(src, "function autoCandIdentity") {
+		t.Error("app.js 缺少 autoCandIdentity（去域同名判定）")
+	}
+	html, err := os.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(html), `name="auto_groups"`) {
+		t.Error("index.html 缺少 auto_groups 隐藏字段（分组不会随保存下发）")
+	}
+}

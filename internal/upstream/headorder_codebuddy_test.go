@@ -74,6 +74,30 @@ func TestHeadOrderCodeBuddy(t *testing.T) {
 	}
 }
 
+// TestHeadOrderCodeBuddyCNHost 回归：国内站（www.codebuddy.cn）也必须走同一张
+// CodeBuddy 顺序表——两站的头族实测完全一致，用它自己的表才对。
+// 若 isCodeBuddyHost 只认 .ai，CN 请求就会落到 WorkBuddy 的 44 头表上，
+// 被改造成另一个产品的形态（比不重排更糟）。
+func TestHeadOrderCodeBuddyCNHost(t *testing.T) {
+	in := "POST /v2/chat/completions HTTP/1.1\r\n" +
+		"Accept: application/json\r\n" +
+		"Host: www.codebuddy.cn\r\n" +
+		"X-Requested-With: XMLHttpRequest\r\n" +
+		"X-Stainless-Os: Linux\r\n" +
+		"User-Agent: CLI/2.180.0 CodeBuddy/2.180.0\r\n" +
+		"\r\n"
+	out := string(reorderHeadBlock([]byte(in)))
+	if len(out) != len(in) {
+		t.Fatalf("长度变了: in=%d out=%d", len(in), len(out))
+	}
+	// 官方原文是全小写，重排应把规范形还原成 x-requested-with / x-stainless-os。
+	for _, want := range []string{"x-requested-with:", "x-stainless-os:"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("CN Host 未按 CodeBuddy 表重排，缺少 %q:\n%s", want, out)
+		}
+	}
+}
+
 // TestHeadOrderWorkBuddyUnaffected 回归：WorkBuddy 的 /v2/chat/completions 仍走原表，
 // 不能被 CodeBuddy 表串味。
 func TestHeadOrderWorkBuddyUnaffected(t *testing.T) {

@@ -79,10 +79,11 @@ func (c *Client) CodeBuddyChatHeaders(req *http.Request, a *auth.Auth, meta Chat
 	// x-stainless-* 系列：官方 CLI 用 node SDK，这 7 个头是 SDK 自动加的。
 	// 抓包逐字确认（2026-11-05）：arch=x64 / lang=js / os=Linux / package-version=7.39.0 /
 	// retry-count=0 / runtime=node / runtime-version=v22.23.2。
-	// 注意 os 是 **Linux**——官方 CLI 就跑在 Linux 上；网关同环境，无需伪造 Windows。
+	// 注意 os 是 **Linux**（首字母大写）：官方取的是 node 的 os.type()，不是
+	// process.platform（后者是小写 linux）。2026-11-05 抓包三份样本均为 "Linux"。
 	req.Header.Set("x-stainless-arch", "x64")
 	req.Header.Set("x-stainless-lang", "js")
-	req.Header.Set("x-stainless-os", "linux")
+	req.Header.Set("x-stainless-os", "Linux")
 	req.Header.Set("x-stainless-package-version", "7.39.0")
 	req.Header.Set("x-stainless-retry-count", "0")
 	req.Header.Set("x-stainless-runtime", "node")
