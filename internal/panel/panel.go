@@ -373,29 +373,38 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "models": out})
 }
 
-// attachObservedRates 给模型条目挂上**本地实测倍率**（每百万 token 实际消耗的积分）。
+// attachObservedRates 给模型条目挂上**本地实测消耗**（每百万 token 实际扣的积分）。
 //
-// 为什么需要：上游 `credits` 字段是**牌价**，对个别模型明显滞后。2026-11-05 实测
-// `deepseek-v4.1-flash` 上游返回 `x0.00`，但本地台账 84.7 亿 token 实扣 4406 积分
-// ≈ `x0.52`——面板若只显示牌价，用户会以为它免费。
+// 为什么需要：上游 `credits` 是**倍率**（牌价），对个别模型明显滞后。2026-11-05 实测
+// `deepseek-v4.1-flash` 上游返回 `x0.00`，但本地台账最近三天实扣 0.32 / 1.80 / 1.64
+// 积分每百万 token——面板若只显示牌价，用户会以为它免费。
 //
-// 数据源：usage 快照的 CreditByModel（Key 是裸模型名；比例分母只统计与 credit
-// 同时存在的 token 样本，所以只有真正扣过费且有 token 的模型才有值）。
-// 无观测的模型不挂字段——「不知道」比「猜 0」诚实。
+// **两个数是不同量纲，不能互相替换**：倍率是牌价系数；积分/百万token 还受输入输出
+// 比例与缓存命中率影响（同一份台账里 rate=0.11 对应 1.20、rate=0.03 对应 1.15）。
+// 所以这里只提供实测值供前端**加标注**，绝不覆盖牌价本身。
+//
+// 数据源：usage 快照的 CreditByModel。注意它按 (模型, 当时的 rate) 分组，同一模型会
+// 出现多行——必须**跨行累加** credits/tokens 再求比值，否则单行比值没有意义
+// （曾按行取值，算出 x29.49 这种怪数）。窗口取最近 7 天：全历史会把早期便宜期摊进来。
 func attachObservedRates(rec *usage.Recorder, entries []map[string]any) {
 	if rec == nil || len(entries) == 0 {
 		return
 	}
-	// 用**最近 7 天**窗口而不是全历史：模型会调价，全历史平均会把早期便宜期
-	// 摊进来（实测 deepseek-v4.1-flash 全历史 0.52、最近两天 1.6~1.8，
-	// 而当前真实价就在后者）。7 天兼顾「够样本」与「够新」。
-	obs := map[string]float64{}
+	type sum struct{ credits, tokens float64 }
+	agg := map[string]*sum{}
 	for _, a := range rec.SnapshotWindow(usage.Window{Hours: 7 * 24}, nil, nil).CreditByModel {
-		if a.CreditTokens > 0 && a.CreditsPer1MTokens > 0 {
-			obs[a.Key] = a.CreditsPer1MTokens
+		if a.Credits <= 0 || a.CreditTokens <= 0 {
+			continue
 		}
+		s := agg[a.Key]
+		if s == nil {
+			s = &sum{}
+			agg[a.Key] = s
+		}
+		s.credits += a.Credits
+		s.tokens += float64(a.CreditTokens)
 	}
-	if len(obs) == 0 {
+	if len(agg) == 0 {
 		return
 	}
 	for _, e := range entries {
@@ -403,12 +412,13 @@ func attachObservedRates(rec *usage.Recorder, entries []map[string]any) {
 		if i := strings.IndexByte(id, ':'); i >= 0 {
 			id = id[i+1:] // 去掉 realm 前缀，与 CreditByModel 的裸名对齐
 		}
-		v, ok := obs[id]
-		if !ok {
+		s := agg[id]
+		if s == nil || s.tokens <= 0 {
 			continue
 		}
-		e["observed_rate"] = fmt.Sprintf("x%.2f", v)
-		e["observed_credits_per_1m"] = v
+		per1m := s.credits / s.tokens * 1_000_000
+		e["observed_credits_per_1m"] = per1m
+		e["observed_rate_label"] = fmt.Sprintf("%.2f 积分/百万token", per1m)
 	}
 }
 
