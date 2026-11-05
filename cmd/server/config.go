@@ -147,6 +147,10 @@ type Config struct {
 		// 全部出站请求生效：chat/refresh/checkin/balance/report/travel/FetchModels。
 		// 默认值已对齐官方 WorkBuddy 桌面形态（三段式），用户仍可配完全自定义值改写。
 		UserAgent string `json:"user_agent"`
+		// CodeBuddyBase CodeBuddy 产品通道（@cb 后缀模型）的出站 base。
+		// 空 = 默认 https://www.codebuddy.ai。仅 @cb 模型使用，WorkBuddy 通道不读它。
+		// 主要用途：把 CodeBuddy 流量指向自建镜像/抓包代理做验证。
+		CodeBuddyBase string `json:"codebuddy_base"`
 		// ClientVersion WorkBuddy 客户端版本段（出站 UA 的 `WorkBuddy/<ver>` 与归属头
 		// X-IDE-Version）。空 = 按 realm 取内置默认（官方 CN 5.9.3 / global 5.9.4）。
 		ClientVersion string `json:"client_version"`

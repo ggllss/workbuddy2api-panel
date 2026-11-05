@@ -179,6 +179,8 @@ func main() {
 	up.GlobalEnabled = cfg.Global.Enabled
 	up.ChatBaseGlobal = cfg.Global.ChatBase
 	up.BillingBaseGlobal = cfg.Global.BillingBase
+	// CodeBuddy 产品通道 base（@cb 模型专用；空 = 默认 www.codebuddy.ai）。
+	up.CodeBuddyBase = cfg.Upstream.CodeBuddyBase
 	auth.SetGlobalEnabled(cfg.Global.Enabled)
 	// model.json 本地缓存接线（context_length/max_output_tokens 四级查找链第 3 级）：
 	// 数据目录与 state.json 同风格（Docker volume 持久化路径）。首次缺失/损坏自动

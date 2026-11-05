@@ -866,7 +866,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		// 产品通道：模型名带 @cb 后缀 → CodeBuddy（www.codebuddy.ai + CLI 头族）。
 		// 与 realm 正交，故单独一维，不塞进 realm。
-		chatMeta := upstream.ChatMeta{ConversationID: convID, Product: Product(peek.Model)}
+		//
+		// **必须按当前候选算，不能用 peek.Model**：auto:all 的 peek.Model 是 "auto:all"
+		// （无后缀 → Product 恒空），若用它，降级到 @cb 候选时仍走 WorkBuddy 通道——
+		// 候选上的后缀被静默忽略。这是 auto 与 @cb 组合时的真实缺陷（2026-11-05 发现）。
+		product := Product(peek.Model)
+		if autoAll {
+			product = Product(candModel)
+		}
+		chatMeta := upstream.ChatMeta{ConversationID: convID, Product: product}
 		if v := r.Header.Get("X-Conversation-Request-ID"); v != "" {
 			chatMeta.ConversationRequestID = v
 		} else if turnKey != "" && sessKey != "" {
