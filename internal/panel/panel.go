@@ -369,7 +369,47 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "没有可用账号：请先在面板添加账号再查询")
 		return
 	}
+	attachObservedRates(p.cfg.Usage, out)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "models": out})
+}
+
+// attachObservedRates 给模型条目挂上**本地实测倍率**（每百万 token 实际消耗的积分）。
+//
+// 为什么需要：上游 `credits` 字段是**牌价**，对个别模型明显滞后。2026-11-05 实测
+// `deepseek-v4.1-flash` 上游返回 `x0.00`，但本地台账 84.7 亿 token 实扣 4406 积分
+// ≈ `x0.52`——面板若只显示牌价，用户会以为它免费。
+//
+// 数据源：usage 快照的 CreditByModel（Key 是裸模型名；比例分母只统计与 credit
+// 同时存在的 token 样本，所以只有真正扣过费且有 token 的模型才有值）。
+// 无观测的模型不挂字段——「不知道」比「猜 0」诚实。
+func attachObservedRates(rec *usage.Recorder, entries []map[string]any) {
+	if rec == nil || len(entries) == 0 {
+		return
+	}
+	// 用**最近 7 天**窗口而不是全历史：模型会调价，全历史平均会把早期便宜期
+	// 摊进来（实测 deepseek-v4.1-flash 全历史 0.52、最近两天 1.6~1.8，
+	// 而当前真实价就在后者）。7 天兼顾「够样本」与「够新」。
+	obs := map[string]float64{}
+	for _, a := range rec.SnapshotWindow(usage.Window{Hours: 7 * 24}, nil, nil).CreditByModel {
+		if a.CreditTokens > 0 && a.CreditsPer1MTokens > 0 {
+			obs[a.Key] = a.CreditsPer1MTokens
+		}
+	}
+	if len(obs) == 0 {
+		return
+	}
+	for _, e := range entries {
+		id, _ := e["id"].(string)
+		if i := strings.IndexByte(id, ':'); i >= 0 {
+			id = id[i+1:] // 去掉 realm 前缀，与 CreditByModel 的裸名对齐
+		}
+		v, ok := obs[id]
+		if !ok {
+			continue
+		}
+		e["observed_rate"] = fmt.Sprintf("x%.2f", v)
+		e["observed_credits_per_1m"] = v
+	}
 }
 
 // panelModelEntry 构造单个模型条目（两域共用）：id 带 realm 前缀（调用值即显示值），

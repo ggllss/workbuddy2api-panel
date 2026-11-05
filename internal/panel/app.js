@@ -760,6 +760,14 @@ function outCell(m, pr) {
    modelPromotions 给当前生效折扣（限时免费 factor=0 / 夜间五折 0.5 等）——
    WorkBuddy 客户端显示的正是生效价。有折扣：生效价大字 + 标签 + 划线牌价，
    悬停带时段说明；无 factor 只有标签（错峰类）：牌价 + 标签。 */
+/* rateNum 解析 "x0.52" / "x0.52 credits" → 0.52；无法解析返回 null。 */
+function rateNum(s) {
+  if (!s) return null;
+  const t = String(s).toLowerCase().replace(/credits/g, '').replace(/x/g, '').trim();
+  const v = parseFloat(t);
+  return isFinite(v) ? v : null;
+}
+
 function rateCell(m) {
   const tip = m.promo_note ? ' title="' + esc(m.promo_note) + '"' : '';
   if (m.promo_factor != null && m.promo_credits) {
@@ -770,6 +778,16 @@ function rateCell(m) {
   if (m.promo_label) {
     return '<span' + tip + ' style="cursor:help">' + (m.credits ? esc(m.credits) : '—') +
       ' <span class="tag warn">' + esc(m.promo_label) + '</span></span>';
+  }
+  // 实测价：本地台账算出的真实消耗（每百万 token 积分）。上游 credits 是牌价，
+  // 对个别模型明显滞后——2026-11-05 实测 deepseek-v4.1-flash 上游给 x0.00，
+  // 但本地 84.7 亿 token 实扣 4406 积分 ≈ x0.52。差异明显时以实测为准，
+  // 牌价划线保留（同限时折扣的呈现方式）。
+  const obs = m.observed_rate, pv = rateNum(m.credits), ov = rateNum(obs);
+  if (obs && ov !== null && (pv === null || Math.abs(ov - pv) > Math.max(0.03, ov * 0.25))) {
+    const base = m.credits ? ' <s style="color:var(--ink-3);font-size:11.5px">' + esc(m.credits) + '</s>' : '';
+    return '<span title="本地台账实测倍率（每百万 token 实际消耗积分）；划线为上游牌价" style="cursor:help">' +
+      '<b>' + esc(obs) + '</b> <span class="tag warn">实测</span>' + base + '</span>';
   }
   return m.credits ? esc(m.credits) : '—';
 }
