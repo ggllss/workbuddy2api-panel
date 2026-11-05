@@ -1122,6 +1122,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <div id="autoCandPick" class="hint" style="margin-top:8px"></div>
             <div id="autoCandList" style="margin-top:8px"></div>
             <input type="hidden" name="auto_candidates" id="autoCandidates">
+            <!-- 分组候选（auto.groups）：由前端按「去掉域后同名」从扁平列表推导后下发，
+                 不需要用户单独编辑。后端以它为准确认「组内同模型、模型不跨组」。 -->
+            <input type="hidden" name="auto_groups" id="autoGroups">
           </div>
         </div>
 

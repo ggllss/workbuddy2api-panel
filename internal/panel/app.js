@@ -1237,6 +1237,7 @@ const CFG_MAP = {
   session_sticky_enabled: ['session_sticky', 'enabled'],
   request_client_info: ['logging', 'request_client_info'],
   auto_candidates: ['auto', 'candidates'],
+  auto_groups: ['auto', 'groups'],
   peak_input_cache_hit: ['cost', 'peak_input_cache_hit'],
   peak_input_cache_miss: ['cost', 'peak_input_cache_miss'],
   peak_output: ['cost', 'peak_output'],
@@ -1299,7 +1300,12 @@ function collectConfig() {
     else {
       const raw = el.value.trim();
       // 覆盖型字段空串照发（见 CLEARABLE_CFG）；其余空 = 不下发。
-      if (name === 'auto_candidates') {
+      if (name === 'auto_groups') {
+        // 二维数组：空串 = 未分组（后端按「每候选自成一组」兼容处理）。
+        try { v = raw === '' ? [] : JSON.parse(raw); }
+        catch (_) { v = []; }
+      }
+      else if (name === 'auto_candidates') {
         // 数组字段：空数组是合法取值（= 清空候选、关闭 auto:all），必须照发，
         // 否则「取消全部候选后保存」会被后端当作未提交而保留旧列表。
         v = raw === '' ? [] : raw.split(/[,，\s]+/).filter(Boolean);
@@ -1382,23 +1388,62 @@ $('cfgForm').onsubmit = async ev => {
    autoCandState 里，任何变更都回写 hidden input，collectConfig 特判成数组。
    模型清单来自 /panel/api/models（直连上游，较贵）→ 只在点按钮时拉。 */
 
+/* autoCandIdentity 分组身份 = 模型名去掉 realm 前缀。
+   同一个模型的不同域通道（global:X 与 cn:X）同身份 → 同一分组；
+   global:X@cb 与 global:X-sg@cb 身份不同 → 必须分属两组。 */
+function autoCandIdentity(m) {
+  const i = String(m).indexOf(':');
+  return i < 0 ? String(m) : String(m).slice(i + 1);
+}
+
+/* autoCandGrouped 按身份稳定分组：组序 = 首次出现顺序，组内保持原相对顺序。
+   返回 [{identity, members:[]}]。 */
+function autoCandGrouped() {
+  const order = [];
+  const byId = new Map();
+  for (const m of autoCandState) {
+    const id = autoCandIdentity(m);
+    if (!byId.has(id)) { byId.set(id, []); order.push(id); }
+    byId.get(id).push(m);
+  }
+  return order.map(id => ({ identity: id, members: byId.get(id) }));
+}
+
+/* autoCandFlatGrouped 扁平化（按分组顺序），即保存时下发的 auto_candidates。 */
+function autoCandFlatGrouped() {
+  return autoCandGrouped().flatMap(g => g.members);
+}
+
 function autoCandSync() {
+  const grouped = autoCandGrouped();
+  const flat = autoCandFlatGrouped();
   const hidden = $('cfgForm').elements['auto_candidates'];
-  if (hidden) hidden.value = autoCandState.join(', ');
+  if (hidden) hidden.value = flat.join(', ');
+  const gh = $('cfgForm').elements['auto_groups'];
+  if (gh) gh.value = JSON.stringify(grouped.map(g => g.members));
   const box = $('autoCandList');
   if (!box) return;
   if (!autoCandState.length) {
     box.innerHTML = '<div style="color:var(--ink-3);font-size:12.5px">尚未选择候选模型：auto:all 请求将返回 400。</div>';
     return;
   }
-  box.innerHTML = autoCandState.map((m, i) =>
+  // 组号按「首次出现顺序」标注：同身份的行共享同一个组号。
+  const groupNo = new Map();
+  grouped.forEach((g, gi) => g.members.forEach(m => groupNo.set(m, gi + 1)));
+  const needsReorder = autoCandState.some((m, i) => m !== flat[i]);
+  const hint = needsReorder
+    ? '<div style="color:var(--warn);font-size:12px;margin-bottom:4px">保存时会按分组重排（同模型的行会被归到一起）</div>'
+    : '';
+  box.innerHTML = hint + autoCandState.map((m, i) =>
     '<div style="display:flex;align-items:center;gap:6px;padding:3px 0">' +
-    '<span style="color:var(--ink-3);min-width:16px">' + (i + 1) + '</span>' +
+    '<span class="tag" style="min-width:34px;text-align:center">组' + groupNo.get(m) + '</span>' +
     '<code style="flex:1;overflow-wrap:anywhere">' + esc(m) + '</code>' +
     '<button type="button" class="xs" data-act="up" data-i="' + i + '"' + (i === 0 ? ' disabled' : '') + '>↑</button>' +
     '<button type="button" class="xs" data-act="down" data-i="' + i + '"' + (i === autoCandState.length - 1 ? ' disabled' : '') + '>↓</button>' +
     '<button type="button" class="xs" data-act="del" data-i="' + i + '">移除</button>' +
-    '</div>').join('');
+    '</div>').join('') +
+    '<div class="hint" style="margin-top:6px;font-size:12px">组内是同一模型的不同域通道，调用时按账号可用性均匀轮转；' +
+    '整组都不可用才降级到下一组。</div>';
 }
 
 function renderAutoCandPick() {

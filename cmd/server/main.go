@@ -106,6 +106,7 @@ func main() {
 	p.SetPreferExpiring(cfg.Pool.PreferExpiring)
 	// 全量 auto（auto:all）候选模型：有序列表驱动跨模型降级（空 = 功能关闭）。
 	p.SetAutoCandidates(cfg.Auto.Candidates)
+	p.SetAutoGroups(cfg.Auto.Groups)
 
 	// 会话粘性路由（可配关闭）。
 	var sessRouter *session.Router
@@ -600,6 +601,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, cost *usage.Prici
 	p.SetPreferExpiring(newCfg.Pool.PreferExpiring)
 	// 全量 auto 候选列表热生效（pool setter，无需重启；不进 restartRequiredFields）。
 	p.SetAutoCandidates(newCfg.Auto.Candidates)
+	p.SetAutoGroups(newCfg.Auto.Groups)
 	sch.SetExpiringSoonWindow(newCfg.ExpiringSoonDur)
 	sch.Reconfigure(
 		newCfg.Schedule.CheckinHours, newCfg.Schedule.TravelHours,

@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -622,6 +623,39 @@ func cachedModelsSnapshot() []upstream.ModelInfo {
 	return dynamicModelsCache.ids
 }
 
+// autoRotateSeq 组内轮转的请求序号（进程内单调递增）。
+var autoRotateSeq atomic.Uint64
+
+// autoCandidateOrder 构造本次 auto:all 的候选尝试顺序。
+//
+// 组内轮转：同一模型的不同域通道（如 global:A 与 cn:A）均匀分担流量——否则组内
+// 第一个候选只要还有号就永远命中，另一域的账号长期闲置（用户 2026-11-05 要求
+// 「优先均匀分配，保证流量分散」）。
+//
+// 组序**不变**（组间仍按配置优先级），所以「整组不可用才降级」的语义不受影响：
+// 扁平列表保持组内相邻，循环照旧逐个前进——走到下一组第一个元素即等于降级。
+func (h *Handler) autoCandidateOrder() []string {
+	groups := h.cfg.Pool.AutoGroups()
+	if len(groups) == 0 {
+		// 未配置分组（旧配置）：每个候选自成一组，顺序即配置顺序，零回归。
+		return h.cfg.Pool.AutoCandidates()
+	}
+	seq := autoRotateSeq.Add(1)
+	out := make([]string, 0, len(groups)*2)
+	for gi, g := range groups {
+		n := len(g)
+		if n == 0 {
+			continue
+		}
+		// 起点按请求序号轮转，并按组序错开：多组同时轮转时首轮不会全撞同一域。
+		start := int((seq + uint64(gi)) % uint64(n))
+		for k := 0; k < n; k++ {
+			out = append(out, g[(start+k)%n])
+		}
+	}
+	return out
+}
+
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 客户端 IP 提取（按请求传递到 ChatStream，不透传时 upstream 侧忽略）；
 	// 消除早年共享字段方案的并发交叉污染（issue：ClientIP 竞态）。
@@ -680,7 +714,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	autoAll := peek.Model == AutoAllModel
 	candidateModels := []string{peek.Model}
 	if autoAll {
-		candidateModels = h.cfg.Pool.AutoCandidates()
+		candidateModels = h.autoCandidateOrder()
 		if len(candidateModels) == 0 {
 			// 未配置候选：明确 400，**不静默把 "auto:all" 当普通模型名透传上游**
 			// （上游没有这个模型，透传只会换来一次无意义的 11102）。

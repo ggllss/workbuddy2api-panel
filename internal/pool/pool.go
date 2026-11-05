@@ -80,6 +80,8 @@ type Pool struct {
 	// auto.candidates），面板保存即热生效（无需重启）。空 = 该模式关闭
 	// （handler 对 auto:all 直接 400，不静默透传上游）。顺序即优先级。
 	autoCandidates []string
+	// autoGroups 分组候选：组内是同模型的不同域通道，选号时组内轮转。
+	autoGroups [][]string
 	// stopCh 关闭信号：Close 关闭它使 startFlusher 的后台 goroutine 退出。
 	// nil = 未启动 flusher（stateFp 为空时 New 不起 flusher）。
 	stopCh chan struct{}
@@ -258,6 +260,33 @@ func (p *Pool) SetAutoCandidates(models []string) {
 // AutoCandidates 返回候选模型列表的拷贝（handler 选路用，按顺序即优先级）。
 // 返回拷贝：调用方（handler）持锁外遍历，不能与并发的 SetAutoCandidates 共享底层数组。
 // 空 = 未配置。
+// SetAutoGroups 注入分组候选（顺序即组优先级，组内元素去掉域后同名）。
+// 与 SetAutoCandidates 并存：扁平列表仍供旧路径使用，分组只影响 auto:all 的
+// 组内轮转。空 = 未配置分组，按「每个候选自成一组」处理。
+func (p *Pool) SetAutoGroups(groups [][]string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	cp := make([][]string, 0, len(groups))
+	for _, g := range groups {
+		cp = append(cp, append([]string(nil), g...))
+	}
+	p.autoGroups = cp
+}
+
+// AutoGroups 返回分组候选的深拷贝（handler 组内轮转用）。
+func (p *Pool) AutoGroups() [][]string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if len(p.autoGroups) == 0 {
+		return nil
+	}
+	cp := make([][]string, 0, len(p.autoGroups))
+	for _, g := range p.autoGroups {
+		cp = append(cp, append([]string(nil), g...))
+	}
+	return cp
+}
+
 func (p *Pool) AutoCandidates() []string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

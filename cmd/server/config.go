@@ -280,6 +280,13 @@ type Config struct {
 		// 空 = 功能关闭（auto:all 请求返回 400）。可把 "cn:auto" 作为普通一项
 		// 加到末尾保底（上游自身的 auto 档）。
 		Candidates []string `json:"candidates"`
+		// Groups 分组候选（顺序即组优先级）。每组内的元素必须**去掉域后同名**——
+		// 即同一个模型的不同域通道（如 global:deepseek-v4.1-flash@cb 与
+		// cn:deepseek-v4.1-flash@cb 同组；global:...-flash-sg@cb 则不能同组）。
+		// 组内不区分国内外：选号时按账号可用性均匀轮转，命中哪个域就用哪个域的模型名。
+		// 整组所有成员都不可用才递增到下一组。
+		// 非空时以它为准（Candidates 由它扁平化而来）；为空则每个 candidate 自成一组。
+		Groups [][]string `json:"groups"`
 	} `json:"auto"`
 
 	SessionSticky struct {
@@ -668,7 +675,17 @@ func (c *Config) normalize() error {
 	}
 	// 全量 auto 候选模型：去空/去重 + realm 前缀校验（非法项 fail fast，见
 	// normalizeAutoCandidates）。空列表 = 功能关闭（auto:all 返回 400）。
-	if c.Auto.Candidates, err = normalizeAutoCandidates(c.Auto.Candidates); err != nil {
+	if len(c.Auto.Groups) > 0 {
+		// 分组为准：校验后扁平化给 pool/handler 用（它们只认有序候选列表）。
+		if c.Auto.Groups, err = normalizeAutoGroups(c.Auto.Groups); err != nil {
+			return err
+		}
+		flat := make([]string, 0, len(c.Auto.Groups))
+		for _, g := range c.Auto.Groups {
+			flat = append(flat, g...)
+		}
+		c.Auto.Candidates = flat
+	} else if c.Auto.Candidates, err = normalizeAutoCandidates(c.Auto.Candidates); err != nil {
 		return err
 	}
 	if c.Pool.BreakerThreshold <= 0 {
@@ -844,6 +861,64 @@ func normalizeOffPeakDates(in []string) ([]string, error) {
 		}
 		seen[d] = true
 		out = append(out, d)
+	}
+	return out, nil
+}
+
+// normalizeAutoGroups 校验并归一化分组候选（auto.groups）。
+//
+// 规则（用户 2026-11-05 定）：
+//   - 每组元素形如 "realm:模型"，realm 只支持 cn / global；
+//   - **组内必须去掉域后同名**（同一模型的不同域通道才能同组）；
+//   - 同一个模型不能出现在多个分组（否则「整组不可用才降级」的语义会自相矛盾：
+//     同一模型在组 1 不可用，在组 2 也不会可用）；
+//   - 组间顺序即优先级；组内顺序只影响首轮尝试，运行时会轮转以保证流量分散。
+func normalizeAutoGroups(groups [][]string) ([][]string, error) {
+	out := make([][]string, 0, len(groups))
+	seenIdentity := make(map[string]bool, len(groups))
+	for gi, g := range groups {
+		members := make([]string, 0, len(g))
+		seenMember := make(map[string]bool, len(g))
+		identity := ""
+		for _, raw := range g {
+			item := strings.TrimSpace(raw)
+			if item == "" {
+				continue
+			}
+			idx := strings.IndexByte(item, ':')
+			if idx < 0 {
+				return nil, fmt.Errorf("auto.groups[%d]: %q 缺少 realm 前缀（应为 \"cn:<模型>\" 或 \"global:<模型>\"）", gi, item)
+			}
+			realm, bare := item[:idx], strings.TrimSpace(item[idx+1:])
+			if realm != "cn" && realm != "global" {
+				return nil, fmt.Errorf("auto.groups[%d]: %q 的 realm 前缀非法（只支持 cn / global）", gi, item)
+			}
+			if bare == "" {
+				return nil, fmt.Errorf("auto.groups[%d]: %q 缺少模型名", gi, item)
+			}
+			if bare == server.AutoAllModel {
+				return nil, fmt.Errorf("auto.groups[%d]: %q 不能把 %s 自身作为候选（自指）", gi, item, server.AutoAllModel)
+			}
+			if identity == "" {
+				identity = bare
+			} else if identity != bare {
+				return nil, fmt.Errorf("auto.groups[%d]: 组内必须是同一个模型（去掉域后同名），%q 与 %q 不同", gi, identity, bare)
+			}
+			canonical := realm + ":" + bare
+			if seenMember[canonical] {
+				continue
+			}
+			seenMember[canonical] = true
+			members = append(members, canonical)
+		}
+		if len(members) == 0 {
+			return nil, fmt.Errorf("auto.groups[%d]: 分组为空", gi)
+		}
+		if seenIdentity[identity] {
+			return nil, fmt.Errorf("auto.groups: 模型 %q 出现在多个分组（同一模型应放同一组）", identity)
+		}
+		seenIdentity[identity] = true
+		out = append(out, members)
 	}
 	return out, nil
 }
