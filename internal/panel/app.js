@@ -779,17 +779,15 @@ function rateCell(m) {
     return '<span' + tip + ' style="cursor:help">' + (m.credits ? esc(m.credits) : '—') +
       ' <span class="tag warn">' + esc(m.promo_label) + '</span></span>';
   }
-  // 实测消耗：本地台账最近 7 天真实扣的积分（每百万 token）。
-  // 与「倍率」**不是同一量纲**（还受输入输出比例、缓存命中率影响），所以只在
-  // 牌价显示为 0/空、但实际有扣费时加一个警示标注——绝不替换牌价数字。
-  // 背景：官方 /v3/config 对 deepseek-v4.1-flash 返回 x0.00，但实测每天在扣费。
-  const pv = rateNum(m.credits);
-  const obsLabel = m.observed_rate_label;
-  const chargedButFree = obsLabel && (pv === null || pv === 0);
-  const base = m.credits ? esc(m.credits) : '—';
-  if (chargedButFree) {
-    return '<span title="上游牌价显示免费，但本地台账确有扣费" style="cursor:help">' + base +
-      ' <span class="tag warn">实测 ' + esc(obsLabel) + '</span></span>';
+  // 实测价：本地台账算出的真实消耗（每百万 token 积分）。上游 credits 是牌价，
+  // 对个别模型明显滞后——2026-11-05 实测 deepseek-v4.1-flash 上游给 x0.00，
+  // 但本地 84.7 亿 token 实扣 4406 积分 ≈ x0.52。差异明显时以实测为准，
+  // 牌价划线保留（同限时折扣的呈现方式）。
+  const obs = m.observed_rate, pv = rateNum(m.credits), ov = rateNum(obs);
+  if (obs && ov !== null && (pv === null || Math.abs(ov - pv) > Math.max(0.03, ov * 0.25))) {
+    const base = m.credits ? ' <s style="color:var(--ink-3);font-size:11.5px">' + esc(m.credits) + '</s>' : '';
+    return '<span title="本地台账实测倍率（每百万 token 实际消耗积分）；划线为上游牌价" style="cursor:help">' +
+      '<b>' + esc(obs) + '</b> <span class="tag warn">实测</span>' + base + '</span>';
   }
   return m.credits ? esc(m.credits) : '—';
 }
