@@ -490,8 +490,9 @@ function renderAccBody() {
     // 此前无条件显示，导致每个历史上被限流过的账号永久挂着「429 rate limit」，与同一行
     // 刚算出的「可用」标签自相矛盾（用户实测：账号池所有行都显示 429 rate limit）。
     // 只在原因真正生效时展示：冷却/熔断/降权中，或账号被禁用。
+    // 原因注脚单行省略（.acc-note），完整原因放 title——长原因曾把整行撑高。
     const note = (s.reason && (cool > 0 || s.disabled))
-      ? '<div class="hint" style="font-size:11.5px;color:var(--ink-3);margin-top:3px">' + esc(s.reason) + '</div>'
+      ? '<div class="acc-note" title="' + esc(s.reason) + '">' + esc(s.reason) + '</div>'
       : '';
     const rateLimits = rateLimitRowsHtml(s.rate_limited_models, Date.now());
     const short = s.uid.length > 16 ? s.uid.slice(0, 16) + '…' : s.uid;

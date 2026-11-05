@@ -223,6 +223,14 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .acc tbody tr.off .mark i { background: var(--bad); }
 /* 模型表无色条（健康指示只属于账号表）。 */
 .acc.md .mark { display: none; }
+/* 状态列的原因注脚：单行省略，完整原因放 title 悬停看。
+   此前不限宽不换行，长原因（如 "account banned by upstream (11140 request illegal),
+   re-login required"）会把整行撑高，七行账号表被拉得很长。 */
+.acc .acc-note {
+  font-size: 11.5px; color: var(--ink-3); margin-top: 3px;
+  max-width: 200px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 /* 操作列用 width:1px + nowrap 的经典技巧：列宽恰为内容宽，其余列按内容自适应 */
 .acc .c-acts { width: 1px; white-space: nowrap; }
 /* 档位标签列：允许换行在标签之间（不拆字），并给足最小宽度 */

@@ -55,3 +55,33 @@ func TestAccountFilterFrontendWiring(t *testing.T) {
 		}
 	}
 }
+
+// TestAccountReasonNoteTruncated 状态列的原因注脚必须单行省略，完整原因放 title。
+//
+// 背景：reason 是上游原文（如 "account banned by upstream (11140 request illegal),
+// re-login required"），不限宽不换行时会把整行撑高，账号表被拉得很长。
+func TestAccountReasonNoteTruncated(t *testing.T) {
+	js, err := os.ReadFile("app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(js)
+	if !strings.Contains(src, `class="acc-note" title="`) {
+		t.Error("app.js 的原因注脚缺少 .acc-note 与 title（完整原因将无处可看）")
+	}
+	// 旧实现把样式写在行内，无法被 CSS 的单行省略覆盖——回归时这里会先炸。
+	if strings.Contains(src, `class="hint" style="font-size:11.5px`) {
+		t.Error("app.js 仍在用行内样式的 hint 注脚（应改用 .acc-note）")
+	}
+
+	html, err := os.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := string(html)
+	for _, want := range []string{".acc .acc-note", "text-overflow: ellipsis", "white-space: nowrap"} {
+		if !strings.Contains(h, want) {
+			t.Errorf("index.html 的 .acc-note 缺少 %q（注脚不会省略成一行）", want)
+		}
+	}
+}
