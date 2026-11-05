@@ -1773,13 +1773,22 @@ func effectiveModelRate(mi ModelInfo) string {
 // storeModelRates 按 realm 整体替换模型倍率快照。目录成功刷新但没有可解析
 // 倍率时写入空桶，使旧倍率不会继续冒充当前价。
 func (c *Client) storeModelRates(realm string, infos []ModelInfo) {
+	c.storeModelRatesForProduct(realm, infos, "")
+}
+
+// storeModelRatesForProduct 按产品通道写入倍率快照。
+//
+// suffix 非空时键为「裸名 + suffix」（如 deepseek-v4.1-flash@cb），与同名的
+// WorkBuddy 条目**并存不覆盖**——两个产品对同一模型可能给不同牌价（实测：
+// CodeBuddy 目录里 deepseek-v4.1-flash = x0.00，WorkBuddy 侧另有其值）。
+func (c *Client) storeModelRatesForProduct(realm string, infos []ModelInfo, suffix string) {
 	rates := make(map[string]string, len(infos))
 	for _, mi := range infos {
 		if mi.ID == "" {
 			continue
 		}
 		if rate := effectiveModelRate(mi); rate != "" {
-			rates[mi.ID] = rate
+			rates[mi.ID+suffix] = rate
 		}
 	}
 	c.effortsMu.Lock()
@@ -1787,7 +1796,22 @@ func (c *Client) storeModelRates(realm string, infos []ModelInfo) {
 	if c.modelRates == nil {
 		c.modelRates = make(map[string]map[string]string)
 	}
-	c.modelRates[realmKey(realm)] = rates
+	k := realmKey(realm)
+	if c.modelRates[k] == nil {
+		c.modelRates[k] = make(map[string]string, len(rates))
+	}
+	// **按产品分类整片替换**，不是全局替换、也不是逐键合并：
+	//   - 全局替换会让后写的一次冲掉另一产品的倍率（WorkBuddy 刷新抹掉 @cb 条目）；
+	//   - 逐键合并又会让本产品已下架的模型保留陈旧价（旧语义刻意避免这一点）。
+	// 所以只清掉「同一产品类」的旧键（suffix 相同者），另一产品的条目原样保留。
+	for id := range c.modelRates[k] {
+		if strings.HasSuffix(id, codeBuddySuffixForRate) == (suffix != "") {
+			delete(c.modelRates[k], id)
+		}
+	}
+	for id, rate := range rates {
+		c.modelRates[k][id] = rate
+	}
 }
 
 // ModelRate 返回最近成功刷新的指定域模型生效倍率；未知返回空串。
@@ -1795,14 +1819,18 @@ func (c *Client) ModelRate(realm, model string) string {
 	if c == nil || model == "" {
 		return ""
 	}
-	// 容忍产品通道后缀：用量台账按「通道限定名」（如 deepseek-v4.1-flash@cb）记账，
-	// 倍率表却按裸名索引。这里剥掉后缀再查，否则 @cb 模型的倍率回填恒为空。
-	// 注意：两个产品对同名模型可能有不同牌价，目前倍率表只有 WorkBuddy 目录的数据，
-	// 故 @cb 模型回填的是 WorkBuddy 侧倍率——展示用途，不参与计费。
-	model = strings.TrimSuffix(model, codeBuddySuffixForRate)
 	c.effortsMu.RLock()
 	defer c.effortsMu.RUnlock()
-	return c.modelRates[realmKey(realm)][model]
+	m := c.modelRates[realmKey(realm)]
+	// 先按**精确键**查：@cb 模型在表里以「裸名@cb」存，取到的是 CodeBuddy 目录的牌价。
+	if r, ok := m[model]; ok {
+		return r
+	}
+	// 兜底：历史台账/旧调用方可能传带后缀但表里只有裸名的键，剥后缀再试一次。
+	if bare := strings.TrimSuffix(model, codeBuddySuffixForRate); bare != model {
+		return m[bare]
+	}
+	return ""
 }
 
 // GlobalEffortSnapshot 导出 global 域 effort 能力缓存（探测下发 ∪ 静态兜底合并后的桶），

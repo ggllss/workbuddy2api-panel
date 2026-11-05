@@ -201,6 +201,9 @@ func (c *Client) FetchCodeBuddyModelInfos(a *auth.Auth) []ModelInfo {
 	cbModels.infos = infos
 	cbModels.fetched = time.Now()
 	cbModels.lastErr = nil
+	// 把 CodeBuddy 目录的牌价并入倍率表（键带 @cb 后缀，与 WorkBuddy 条目并存）。
+	// 否则面板/台账里 @cb 模型的倍率会回填成 WorkBuddy 侧的价，两边看不出差异。
+	c.storeModelRatesForProduct("global", infos, codeBuddySuffixForRate)
 	return infos
 }
 

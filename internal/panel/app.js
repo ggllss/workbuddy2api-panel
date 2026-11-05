@@ -771,7 +771,27 @@ function rateCell(m) {
     return '<span' + tip + ' style="cursor:help">' + (m.credits ? esc(m.credits) : '—') +
       ' <span class="tag warn">' + esc(m.promo_label) + '</span></span>';
   }
-  return m.credits ? esc(m.credits) : '—';
+  // 目录标价与实际扣费不符时点名：实测 deepseek-v4.1-flash 在两个产品下都标
+  // x0.00（WorkBuddy 侧甚至标 0），但真实扣费分别是 1.33 / 3.01 积分每百万 token。
+  // 只按标价显示会让人以为免费，所以有实测样本且标价判为 0 时挂告警标签。
+  const base = m.credits ? esc(m.credits) : '—';
+  const parsed = parseCreditRate(m.credits);
+  if (m.measured_per_1m > 0 && (parsed === null || parsed === 0)) {
+    const v = Number(m.measured_per_1m);
+    return '<span title="目录标价 ' + (m.credits ? esc(m.credits) : '缺失') +
+      '，但近 24h 实际扣费折算 ' + v.toFixed(2) + ' 积分/百万 token——标价不可信，以实测为准"' +
+      ' style="cursor:help">' + base +
+      ' <span class="tag warn">实测 ' + v.toFixed(2) + '/M</span></span>';
+  }
+  return base;
+}
+
+/* parseCreditRate 从上游 credits 串里取倍率数值（"x0.11" / "0.5x" / "x0.00"）。
+   取不到返回 null——「没标价」与「标价为零」必须区分。 */
+function parseCreditRate(s) {
+  if (s == null || s === '') return null;
+  const m = /([0-9]*\.?[0-9]+)/.exec(String(s));
+  return m ? Number(m[1]) : null;
 }
 
 async function loadModels() {

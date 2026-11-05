@@ -632,7 +632,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	product := Product(peek.Model)
 	modelRate := ""
 	if h.cfg.Upstream != nil {
-		modelRate = h.cfg.Upstream.ModelRate(realm, bareModel)
+		// 按**通道限定名**取倍率：两个产品对同一模型可能有不同牌价，用裸名会取到
+		// WorkBuddy 的价（CodeBuddy 侧 deepseek-v4.1-flash 实测 x0.00）。
+		modelRate = h.cfg.Upstream.ModelRate(realm, usageModelName(bareModel, product))
 	}
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
@@ -829,7 +831,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			product = Product(candModel)
 			modelRate = ""
 			if h.cfg.Upstream != nil {
-				modelRate = h.cfg.Upstream.ModelRate(realm, bareModel)
+				modelRate = h.cfg.Upstream.ModelRate(realm, usageModelName(bareModel, product))
 			}
 			body = rewriteModel(body, bareModel)
 			// 请求流水行的模型列显示本次真正使用的候选（与带前缀请求同一口径：

@@ -379,7 +379,37 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "没有可用账号：请先在面板添加账号再查询")
 		return
 	}
+	// 实测单价回填：目录标价可能是错的（实测 CodeBuddy 侧 deepseek-v4.1-flash
+	// 标 x0.00，实际按 3.01 积分/百万 token 扣费；WorkBuddy 侧同模型标 0 却按
+	// 1.33 扣）。把近 24h 真实扣费折算的单价挂到每个模型上，前端据此提示
+	// 「目录说免费但实际在收钱」，而不是让人被 x0.00 误导。
+	attachMeasuredCost(p.cfg.Usage, p.cfg.Upstream.ModelRate, out)
+
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "models": out})
+}
+
+// attachMeasuredCost 给模型条目补 measured_per_1m（近 24h 实测积分/百万 token）。
+//
+// 键与条目 id 同形（realm:模型@通道），因此两个产品通道各自独立取值。
+// 无实测样本（CreditsPer1MTokens 为 0）不写该字段——「没观测」与「确实免费」
+// 必须区分开，不能把前者显示成后者。
+func attachMeasuredCost(rec *usage.Recorder, rateOf func(realm, model string) string, entries []map[string]any) {
+	if rec == nil || len(entries) == 0 {
+		return
+	}
+	snap := rec.SnapshotWindow(usage.Window{Hours: 24}, nil, rateOf)
+	measured := make(map[string]float64, len(snap.CreditByModel))
+	for _, r := range snap.CreditByModel {
+		if r.CreditsPer1MTokens > 0 {
+			measured[r.Key] = r.CreditsPer1MTokens
+		}
+	}
+	for _, e := range entries {
+		id, _ := e["id"].(string)
+		if v, ok := measured[id]; ok {
+			e["measured_per_1m"] = v
+		}
+	}
 }
 
 // panelModelEntry 构造单个模型条目（两域共用）：id 带 realm 前缀（调用值即显示值），

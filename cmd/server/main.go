@@ -428,6 +428,16 @@ func warmModelRates(ctx context.Context, up *upstream.Client, p *pool.Pool) {
 				} else {
 					log.Printf("[upstream] warm model rates: global ok (%d models)", len(infos))
 				}
+				// CodeBuddy 目录（@cb 后缀）单独预热：它的牌价与 WorkBuddy 不同
+				// （实测 deepseek-v4.1-flash 在 CodeBuddy 侧 x0.00），不预热则重启后
+				// 到首次 /v1/models 之前，@cb 模型的倍率回填为空。
+				if ctx.Err() == nil {
+					if cb := up.FetchCodeBuddyModelInfos(a); len(cb) == 0 {
+						log.Printf("WARN: [upstream] warm model rates (codebuddy): empty model list")
+					} else {
+						log.Printf("[upstream] warm model rates: codebuddy ok (%d models)", len(cb))
+					}
+				}
 			}
 		}
 	}
