@@ -892,15 +892,19 @@ func TestModelsDynamic(t *testing.T) {
 	var resp map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &resp)
 	data := resp["data"].([]any)
-	if len(data) != 3 {
-		t.Fatalf("want 3 dynamic models, got %d: %v", len(data), data)
+	// 6 = WorkBuddy CN 3 个 + CodeBuddy CN 3 个（假上游对 /v3/config 也返回同一份目录，
+	// 故 CN 的 @cb 目录同样拉到 3 个）。两产品并列输出是既定行为（2026-11-05 起）。
+	if len(data) != 6 {
+		t.Fatalf("want 6 dynamic models (3 workbuddy + 3 codebuddy), got %d: %v", len(data), data)
 	}
 	ids := map[string]bool{}
 	for _, m := range data {
 		ids[m.(map[string]any)["id"].(string)] = true
 	}
-	if !ids["cn:dyn-model-a"] || !ids["cn:glm-9.9"] {
-		t.Errorf("dynamic ids missing: %v", ids)
+	for _, want := range []string{"cn:dyn-model-a", "cn:glm-9.9", "cn:dyn-model-a@cb", "cn:glm-9.9@cb"} {
+		if !ids[want] {
+			t.Errorf("dynamic ids missing %s: %v", want, ids)
+		}
 	}
 
 	// 断言字段映射：maxInputTokens → context_length，maxOutputTokens → max_output_tokens
@@ -1026,9 +1030,12 @@ func TestModelsNegativeCacheOnFetchFailure(t *testing.T) {
 			t.Fatalf("req %d: code=%d body=%s", i, rec.Code, rec.Body)
 		}
 	}
-	// 一轮探测 = 2 次上游调用（企业端点 + /v3/config 并发，两路全失败才进负缓存）。
-	if got := calls.Load(); got != 2 {
-		t.Errorf("want 2 probes (console + v3), got %d", got)
+	// 首轮 3 次上游调用：
+	//   2 次 = WorkBuddy CN 目录（企业端点 + /v3/config 并发，两路全失败才进负缓存）
+	//   1 次 = CodeBuddy CN 目录（/v3/config，2026-11-05 起并列拉取）
+	// 后两次请求不再打上游：两边都有负缓存。
+	if got := calls.Load(); got != 3 {
+		t.Errorf("want 3 probes (console + v3 + codebuddy v3), got %d", got)
 	}
 
 	// 冷却期结束（把失败时间戳拨回 10 分钟前）→ 应重新 fetch。
@@ -1040,8 +1047,10 @@ func TestModelsNegativeCacheOnFetchFailure(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("after cooldown: code=%d", rec.Code)
 	}
-	if got := calls.Load(); got != 4 {
-		t.Errorf("want 4 probes after cooldown (2 rounds x 2), got %d", got)
+	// 冷却只拨了 WorkBuddy 侧的失败时间戳，CodeBuddy 侧仍在 5 分钟负缓存里 →
+	// 本轮只多 2 次（WorkBuddy 的两路），累计 3+2=5。
+	if got := calls.Load(); got != 5 {
+		t.Errorf("want 5 probes after cooldown (3 + 2 workbuddy re-probe), got %d", got)
 	}
 }
 

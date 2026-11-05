@@ -340,6 +340,15 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 					out = append(out, panelModelEntry("cn", mi, mi.Efforts, mi.DefaultEffort, p.cfg.Upstream.HTTP))
 				}
 			}
+			// CN 侧 CodeBuddy 目录（www.codebuddy.cn）：必须用 CN 账号拉，
+			// 跨域 token 打 www.codebuddy.ai 会被 401 → 目录静默为空。
+			// id 带 @cb 后缀，与 WorkBuddy CN 同名模型并列展示。
+			for _, mi := range p.cfg.Upstream.FetchCodeBuddyModelInfos(acct) {
+				e := panelModelEntry("cn", mi, mi.Efforts, mi.DefaultEffort, p.cfg.Upstream.HTTP)
+				e["id"] = "cn:" + mi.ID + "@cb"
+				e["product"] = "codebuddy"
+				out = append(out, e)
+			}
 		}
 	}
 

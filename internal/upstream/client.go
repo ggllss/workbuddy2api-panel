@@ -677,7 +677,13 @@ type Client struct {
 	ChatBaseGlobal    string
 	BillingBaseGlobal string
 
-	// CodeBuddyBase CodeBuddy 产品通道（www.codebuddy.ai）的出站 base。
+	// CodeBuddyBase CodeBuddy 产品通道（global，www.codebuddy.ai）的出站 base。
+	// CodeBuddyBaseCN 同上的 CN 版（www.codebuddy.cn）。两者都是空则用各自默认域名。
+	CodeBuddyBaseCN string
+
+	// cbModelsMu / cbModelsByRealm CodeBuddy 目录缓存（按 realm 分桶，实例级）。
+	cbModelsMu      sync.Mutex
+	cbModelsByRealm map[string]*codeBuddyModelsCache
 	// 空 = 缺省默认 https://www.codebuddy.ai。仅被带 `@cb` 后缀的模型使用，
 	// WorkBuddy 通道完全不读它（见 codebuddy.go）。
 	CodeBuddyBase string
@@ -1163,7 +1169,9 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	for _, path := range c.chatPathsFor(a, meta.Product) {
 		base := c.chatBase(a)
 		if meta.Product == "cb" {
-			base = c.codeBuddyChatBase()
+			// 按账号域选 base：CN 账号打 www.codebuddy.cn，global 打 www.codebuddy.ai。
+			// 打错域会被上游 401（不是 403，容易误判成账号问题）。
+			base = c.codeBuddyChatBase(a.Realm())
 		}
 		endpoint := base + path
 		req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(prepared))

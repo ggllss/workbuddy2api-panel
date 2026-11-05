@@ -151,6 +151,9 @@ type Config struct {
 		// 空 = 默认 https://www.codebuddy.ai。仅 @cb 模型使用，WorkBuddy 通道不读它。
 		// 主要用途：把 CodeBuddy 流量指向自建镜像/抓包代理做验证。
 		CodeBuddyBase string `json:"codebuddy_base"`
+		// CodeBuddyBaseCN 同上，CN 域版（空 = 默认 https://www.codebuddy.cn）。
+		// 两个域是独立部署，base 必须分开配：CN 账号的 token 打到国际站会被 401。
+		CodeBuddyBaseCN string `json:"codebuddy_base_cn"`
 		// ClientVersion WorkBuddy 客户端版本段（出站 UA 的 `WorkBuddy/<ver>` 与归属头
 		// X-IDE-Version）。空 = 按 realm 取内置默认（官方 CN 5.9.3 / global 5.9.4）。
 		ClientVersion string `json:"client_version"`

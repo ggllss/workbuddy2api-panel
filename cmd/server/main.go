@@ -181,6 +181,7 @@ func main() {
 	up.BillingBaseGlobal = cfg.Global.BillingBase
 	// CodeBuddy 产品通道 base（@cb 模型专用；空 = 默认 www.codebuddy.ai）。
 	up.CodeBuddyBase = cfg.Upstream.CodeBuddyBase
+	up.CodeBuddyBaseCN = cfg.Upstream.CodeBuddyBaseCN
 	auth.SetGlobalEnabled(cfg.Global.Enabled)
 	// model.json 本地缓存接线（context_length/max_output_tokens 四级查找链第 3 级）：
 	// 数据目录与 state.json 同风格（Docker volume 持久化路径）。首次缺失/损坏自动
@@ -361,7 +362,12 @@ func main() {
 	// 会被当成「收费未知」放行并打穿（实测：重启后 2 分钟，97 分的账号打收费
 	// 模型归零；倍率表当时尚未建立）。
 	// 异步执行：不阻塞监听启动；失败仅记日志（下一轮懒触发或本轮重试仍可补上）。
-	go warmModelRates(ctx, up, p)
+	go func() {
+		warmModelRates(ctx, up, p)
+		// CN 侧 CodeBuddy 目录紧随其后：顺序执行而不是并发，避免启动瞬间
+		// 同时打两个域的上游（池子里 CN 号本来就少）。
+		warmCNCodeBuddyRates(ctx, up, p)
+	}()
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
@@ -433,13 +439,37 @@ func warmModelRates(ctx context.Context, up *upstream.Client, p *pool.Pool) {
 				// 到首次 /v1/models 之前，@cb 模型的倍率回填为空。
 				if ctx.Err() == nil {
 					if cb := up.FetchCodeBuddyModelInfos(a); len(cb) == 0 {
-						log.Printf("WARN: [upstream] warm model rates (codebuddy): empty model list")
+						log.Printf("WARN: [upstream] warm model rates (codebuddy global): empty model list")
 					} else {
-						log.Printf("[upstream] warm model rates: codebuddy ok (%d models)", len(cb))
+						log.Printf("[upstream] warm model rates: codebuddy global ok (%d models)", len(cb))
 					}
 				}
 			}
 		}
+	}
+}
+
+// warmCNCodeBuddyRates CN 侧 CodeBuddy 目录预热。
+//
+// 为什么单独一个函数：CN 分支在 warmModelRates 里要重新选一个 CN 账号，
+// 与 global 分支的账号不同（跨域 token 会 401），塞进原函数会让「取哪个账号」
+// 变得含糊。
+func warmCNCodeBuddyRates(ctx context.Context, up *upstream.Client, p *pool.Pool) {
+	if ctx.Err() != nil || !up.GlobalEnabled {
+		return
+	}
+	uids := p.AvailableUIDsForRealm("cn")
+	if len(uids) == 0 {
+		return
+	}
+	a := p.AuthByUID(uids[0])
+	if a == nil {
+		return
+	}
+	if cb := up.FetchCodeBuddyModelInfos(a); len(cb) == 0 {
+		log.Printf("WARN: [upstream] warm model rates (codebuddy cn): empty model list")
+	} else {
+		log.Printf("[upstream] warm model rates: codebuddy cn ok (%d models)", len(cb))
 	}
 }
 

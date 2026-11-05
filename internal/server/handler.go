@@ -494,29 +494,55 @@ func (h *Handler) modelList() []map[string]any {
 	// deepseek-v4.1-flash = x0.00 而 WorkBuddy 侧同名模型按实际扣费走），
 	// 并列才能让调用方按需选择，也避免把 CodeBuddy 独有模型（glm-5.2/gpt-5.4/
 	// gpt-5.5/hy4-preview/deepseek-v4.1-flash）丢掉。
+	// CN 侧 CodeBuddy 目录：必须用 **CN 账号** 拉（跨域 token 打 www.codebuddy.ai
+	// 会被 401，表现为目录静默为空）。与 WorkBuddy CN 目录并列输出。
+	if acct := h.cnModelAccount(); acct != nil {
+		out = append(out, h.codeBuddyModelEntries("cn", h.cfg.Upstream.FetchCodeBuddyModelInfos(acct))...)
+	}
 	if h.cfg.GlobalEnabled {
 		if ids, acct := h.fetchGlobalModels(); len(ids) > 0 && acct != nil {
-			for _, mi := range h.cfg.Upstream.FetchCodeBuddyModelInfos(acct) {
-				entry := map[string]any{
-					"id":       "global:" + mi.ID + codeBuddySuffix,
-					"object":   "model",
-					"created":  1753600000,
-					"owned_by": "codebuddy",
-				}
-				entry["context_length"] = upstream.ContextWindowListingV4(mi.ID, mi.ContextWindow, h.cfg.Upstream.HTTP)
-				if mo, ok := upstream.MaxOutputTokensListingV4(mi.ID, mi.MaxTokens, h.cfg.Upstream.HTTP); ok {
-					entry["max_output_tokens"] = mo
-				}
-				entry = applyModelInfoFields(entry, mi)
-				if mi.Efforts != nil {
-					entry["reasoning_supported_efforts"] = mi.Efforts
-					if mi.DefaultEffort != "" {
-						entry["reasoning_default_effort"] = mi.DefaultEffort
-					}
-				}
-				out = append(out, entry)
+			out = append(out, h.codeBuddyModelEntries("global", h.cfg.Upstream.FetchCodeBuddyModelInfos(acct))...)
+		}
+	}
+	return out
+}
+
+// cnModelAccount 取第一个可用 CN 账号（拉 CN 目录用）。
+// 与 fetchDynamicModels 同口径（AvailableUIDsForRealm 首个 + AuthByUID），
+// 不用 Pool.Pick——Pick 无 realm 过滤，混合池里可能选中 global 号去打 CN 端点。
+func (h *Handler) cnModelAccount() *auth.Auth {
+	uids := h.cfg.Pool.AvailableUIDsForRealm("cn")
+	if len(uids) == 0 {
+		return nil
+	}
+	return h.cfg.Pool.AuthByUID(uids[0])
+}
+
+// codeBuddyModelEntries 构造某域的 CodeBuddy（@cb）模型条目。
+//
+// 两域条目同构，唯一差别是 id 前缀（cn: / global:）——抽出来避免两份 25 行重复
+// （重复的那份迟早会漏改一处，表现为两个域的 @cb 模型字段不一致）。
+func (h *Handler) codeBuddyModelEntries(realm string, infos []upstream.ModelInfo) []map[string]any {
+	out := make([]map[string]any, 0, len(infos))
+	for _, mi := range infos {
+		entry := map[string]any{
+			"id":       realm + ":" + mi.ID + codeBuddySuffix,
+			"object":   "model",
+			"created":  1753600000,
+			"owned_by": "codebuddy",
+		}
+		entry["context_length"] = upstream.ContextWindowListingV4(mi.ID, mi.ContextWindow, h.cfg.Upstream.HTTP)
+		if mo, ok := upstream.MaxOutputTokensListingV4(mi.ID, mi.MaxTokens, h.cfg.Upstream.HTTP); ok {
+			entry["max_output_tokens"] = mo
+		}
+		entry = applyModelInfoFields(entry, mi)
+		if mi.Efforts != nil {
+			entry["reasoning_supported_efforts"] = mi.Efforts
+			if mi.DefaultEffort != "" {
+				entry["reasoning_default_effort"] = mi.DefaultEffort
 			}
 		}
+		out = append(out, entry)
 	}
 	return out
 }

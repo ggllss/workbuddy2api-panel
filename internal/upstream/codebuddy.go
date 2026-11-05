@@ -30,8 +30,11 @@ import (
 )
 
 const (
-	// codeBuddyBase CodeBuddy 通道默认出站域名。
-	codeBuddyBase = "https://www.codebuddy.ai"
+	// codeBuddyBaseGlobal / codeBuddyBaseCN CodeBuddy 通道默认出站域名。
+	// **必须按 realm 分**：两个站是独立部署，CN 账号的 token 打到国际站会被 401
+	// （实测：cn 账号请求 www.codebuddy.ai 返回 401 Authorization Required）。
+	codeBuddyBaseGlobal = "https://www.codebuddy.ai"
+	codeBuddyBaseCN     = "https://www.codebuddy.cn"
 	// codeBuddyChatPath CodeBuddy chat 路径（与 WorkBuddy 同形，但域名不同）。
 	codeBuddyChatPath = "/v2/chat/completions"
 	// codeBuddyUA 官方 CLI 2.180.0 的真实 UA（抓包逐字节确认）。
@@ -43,12 +46,21 @@ const (
 	codeBuddySuffixForRate = "@cb"
 )
 
-// codeBuddyChatBase 生效的 CodeBuddy 出站 base。
-func (c *Client) codeBuddyChatBase() string {
-	if c.CodeBuddyBase != "" {
-		return c.CodeBuddyBase
+// codeBuddyChatBase 生效的 CodeBuddy 出站 base（按 realm 分域）。
+//
+// realm 口径与 WorkBuddy 一致："" 视作 cn（realmKey）。两域各有一套默认域名，
+// 也各有一个配置覆盖位（global 用 codebuddy_base，cn 用 codebuddy_base_cn）。
+func (c *Client) codeBuddyChatBase(realm string) string {
+	if realmKey(realm) == "global" {
+		if c.CodeBuddyBase != "" {
+			return c.CodeBuddyBase
+		}
+		return codeBuddyBaseGlobal
 	}
-	return codeBuddyBase
+	if c.CodeBuddyBaseCN != "" {
+		return c.CodeBuddyBaseCN
+	}
+	return codeBuddyBaseCN
 }
 
 // CodeBuddyChatHeaders 设置 CodeBuddy 通道的 chat 出站头。
@@ -153,63 +165,102 @@ func ensureCodeBuddySystem(body []byte) []byte {
 // isCodeBuddyHost 判断出站 Host 是否属于 CodeBuddy 域（供头顺序重排分流）。
 func isCodeBuddyHost(host string) bool {
 	h := strings.ToLower(host)
-	return strings.Contains(h, "codebuddy.ai")
+	// 两个站的头族实测完全一致（21 个稳定头、顺序相同），故共用同一张顺序表。
+	return strings.Contains(h, "codebuddy.ai") || strings.Contains(h, "codebuddy.cn")
 }
 
 // codeBuddyModelsTTL CodeBuddy 模型目录缓存时长。与 global 侧同量级（1 小时）：
 // 目录变化很慢，但重新探测要打一次上游。
 const codeBuddyModelsTTL = time.Hour
 
-// codeBuddyModels CodeBuddy 模型目录缓存。
+// codeBuddyModelsCache CodeBuddy 模型目录缓存（单 realm 一份）。
 type codeBuddyModelsCache struct {
 	mu      sync.Mutex
 	infos   []ModelInfo
 	fetched time.Time
 	lastErr error
+	// lastFail 最近一次失败时刻，用于负缓存。
+	lastFail time.Time
 }
 
-var cbModels codeBuddyModelsCache
+// codeBuddyModelsNegativeTTL 目录拉取失败后的重试间隔。
+//
+// 没有它的话，上游一旦挂掉，**每个** /v1/models 请求都会重新打一次上游目录端点
+// ——面板轮询会把失败放大成上游压力（实测：三个请求打了三次）。
+const codeBuddyModelsNegativeTTL = 5 * time.Minute
+
+// cbCacheFor 取本 Client 在指定 realm 上的目录缓存（懒建）。
+//
+// 缓存挂在 Client 上而不是包级变量，两个理由：
+//  1. 按 realm 分桶——CN 与国际站是两套独立目录（条数与内容都不同），共用会让
+//     先到的那次拉取顶掉另一域的结果，表现为「CN 号看到国际站的模型列表」；
+//  2. 实例级——包级缓存会跨测试泄漏（前一个测试填的目录被后一个当成真上游结果），
+//     生产上每进程一个 Client，实例级与包级等价。
+func (c *Client) cbCacheFor(realm string) *codeBuddyModelsCache {
+	c.cbModelsMu.Lock()
+	defer c.cbModelsMu.Unlock()
+	if c.cbModelsByRealm == nil {
+		c.cbModelsByRealm = make(map[string]*codeBuddyModelsCache)
+	}
+	cache, ok := c.cbModelsByRealm[realm]
+	if !ok {
+		cache = &codeBuddyModelsCache{}
+		c.cbModelsByRealm[realm] = cache
+	}
+	return cache
+}
 
 // FetchCodeBuddyModelInfos 拉取 CodeBuddy 产品通道的模型目录（带 1 小时缓存）。
 //
-// 端点与 WorkBuddy 同形（/v3/config），但**域名不同**（www.codebuddy.ai）且
+// 端点与 WorkBuddy 同形（/v3/config），但**域名按 realm 不同**
+// （global=www.codebuddy.ai / cn=www.codebuddy.cn）且
 // 必须用 CLI UA 才能拿到 CLI 面目录（28 个，含 deepseek-v4.1-flash / glm-5.2 /
 // gpt-5.4 / gpt-5.5 / hy4-preview 这 5 个 WorkBuddy 目录里没有的模型）。
 //
 // 失败返回 nil（调用方据此不列 @cb 模型，不做静态兜底——与 global 侧同原则：
 // 目录是纯动态的，编造比缺失更糟）。
+// realm 取自**传入账号**：目录必须用同域账号的 token 拉，跨域会被 401。
 func (c *Client) FetchCodeBuddyModelInfos(a *auth.Auth) []ModelInfo {
 	if c == nil || a == nil {
 		return nil
 	}
-	cbModels.mu.Lock()
-	if len(cbModels.infos) > 0 && time.Since(cbModels.fetched) < codeBuddyModelsTTL {
-		infos := cbModels.infos
-		cbModels.mu.Unlock()
+	realm := realmKey(a.Realm())
+	cache := c.cbCacheFor(realm)
+	cache.mu.Lock()
+	if len(cache.infos) > 0 && time.Since(cache.fetched) < codeBuddyModelsTTL {
+		infos := cache.infos
+		cache.mu.Unlock()
 		return infos
 	}
-	cbModels.mu.Unlock()
-
-	infos, err := c.fetchCodeBuddyModels(a)
-	cbModels.mu.Lock()
-	defer cbModels.mu.Unlock()
-	if err != nil || len(infos) == 0 {
-		cbModels.lastErr = err
-		// 失败不写空（避免把好缓存冲掉），但记时间以便下次重试。
+	// 负缓存：刚失败过就不重试，避免把上游故障放大成请求级重试风暴。
+	if len(cache.infos) == 0 && !cache.lastFail.IsZero() && time.Since(cache.lastFail) < codeBuddyModelsNegativeTTL {
+		cache.mu.Unlock()
 		return nil
 	}
-	cbModels.infos = infos
-	cbModels.fetched = time.Now()
-	cbModels.lastErr = nil
+	cache.mu.Unlock()
+
+	infos, err := c.fetchCodeBuddyModels(a, realm)
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if err != nil || len(infos) == 0 {
+		cache.lastErr = err
+		// 失败不写空（避免把好缓存冲掉），只记失败时刻供负缓存节流。
+		cache.lastFail = time.Now()
+		return nil
+	}
+	cache.infos = infos
+	cache.fetched = time.Now()
+	cache.lastErr = nil
+	cache.lastFail = time.Time{}
 	// 把 CodeBuddy 目录的牌价并入倍率表（键带 @cb 后缀，与 WorkBuddy 条目并存）。
-	// 否则面板/台账里 @cb 模型的倍率会回填成 WorkBuddy 侧的价，两边看不出差异。
-	c.storeModelRatesForProduct("global", infos, codeBuddySuffixForRate)
+	// 按 realm 分桶写入：CN 与国际站对同一模型可能给不同牌价。
+	c.storeModelRatesForProduct(realm, infos, codeBuddySuffixForRate)
 	return infos
 }
 
 // fetchCodeBuddyModels 单次探测 CodeBuddy /v3/config（CLI UA）。
-func (c *Client) fetchCodeBuddyModels(a *auth.Auth) ([]ModelInfo, error) {
-	base := c.codeBuddyChatBase()
+func (c *Client) fetchCodeBuddyModels(a *auth.Auth, realm string) ([]ModelInfo, error) {
+	base := c.codeBuddyChatBase(realm)
 	req, err := http.NewRequest(http.MethodGet, base+"/v3/config", nil)
 	if err != nil {
 		return nil, err
