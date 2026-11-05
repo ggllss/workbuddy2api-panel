@@ -203,9 +203,20 @@ func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelI
 	}
 	// 桌面端 UA（主路）：项目 chat 路径实际使用的 UA，与官方客户端看到的目录同源。
 	// 按账号 realm 生成（global → `WorkBuddy AI` 平台段），故必须传 a 而非用常量。
+	// 只打**桌面端 UA**一路。
+	//
+	// 此前还并发打 IDE UA（CodeBuddyIDE/4.12.0）与 CLI UA（CLI/2.63.2 CodeBuddy），
+	// 取三路并集——但那两个 UA 是 **CodeBuddy 产品**的身份，workbuddy.ai 对它们
+	// 下发的是 CodeBuddy 侧目录。结果是 WorkBuddy 列表里混进 9 个官方 WorkBuddy
+	// 客户端**根本不显示**的模型（2026-11-05 实测对比）：
+	//   o4-mini / auto-chat / codewise-jump / completion-1.0 / enhance-1.0 /
+	//   nes-1.1 / nes-1.2 / seedance-2.5 / deepseek-v4.1-flash
+	// 其中 deepseek-v4.1-flash 正是「面板显示 x0.00 但实际收费」的来源。
+	//
+	// 真·WorkBuddy 目录 = 桌面 UA ∪ 企业端点 = 34 个（实测）；CodeBuddy 侧的
+	// 36 个模型改由 FetchCodeBuddyModelInfos 从 www.codebuddy.ai 取，带 @cb 后缀
+	// 并列输出。两个产品的目录不再互相污染。
 	v3DesktopCh := probeV3(c.defaultWorkBuddyUAFor(a))
-	v3IDECh := probeV3(codeBuddyIDEUA)
-	v3CLICh := probeV3(codeBuddyCLIUA)
 	enterpriseCh := make(chan probeResult, 1)
 	go func() {
 		// 企业端点家族：/v2 首选 → /console 兜底（既有探活序，零回归）。
@@ -222,19 +233,14 @@ func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelI
 		enterpriseCh <- probeResult{err: lastErr}
 	}()
 	v3Desktop := <-v3DesktopCh
-	v3IDE := <-v3IDECh
-	v3CLI := <-v3CLICh
 	enterprise := <-enterpriseCh
-	// v3 三路自合并：桌面端路字段权威（主路），IDE/CLI 只补主路缺失的模型 id
-	// （只补 id，字段仍取自各自条目——主路没有该 id 时才轮到它们）。
-	// 逐路容错：全失败才带 err 进入下游降级判断，部分失败 warn 后继续。
+	// v3 单路（桌面端 UA）：字段与模型集合均以它为准。
+	// mergeV3Routes 保留（单元素入参即原样返回），将来若 /v3 需要多路再扩。
 	v3 := mergeV3Routes([]struct {
 		label string
 		res   probeResult
 	}{
 		{"desktop-UA", v3Desktop},
-		{"IDE-UA", v3IDE},
-		{"CLI-UA", v3CLI},
 	})
 
 	if v3.err != nil && enterprise.err != nil {

@@ -88,9 +88,67 @@ var headTailNames = map[string]struct{}{
 // headRank 把顺序表压成「小写头名 → 名次」，比对时大小写不敏感（Go transport
 // 写出的 key 是**规范形**，与官方原文大小写常不同，例如 X-Ide-Name vs X-IDE-Name、
 // Baggage vs baggage、X-Request-Id vs X-Request-ID）。
-func headRank(path string) (map[string]int, bool) {
-	order, ok := officialHeadOrder[path]
-	if !ok {
+// codeBuddyHeadOrder CodeBuddy 通道（www.codebuddy.ai）的官方头顺序。
+//
+// 抄自 2026-11-05 官方 CLI 2.180.0 真实出站抓包（本地监听器逐字节记录）。
+// 与 WorkBuddy 的 44 头表**完全不同的两套**：CodeBuddy 侧是 node SDK 形态
+// （x-stainless-* 七件套在前、B3 四段在后），WorkBuddy 侧是桌面端渲染器形态。
+//
+// 顺序与大小写同时是权威：reorderHeadBlock 据此重排 + 改拼写。
+var codeBuddyHeadOrder = []string{
+	"Accept",
+	"Content-Type",
+	"x-requested-with",
+	"x-stainless-arch",
+	"x-stainless-lang",
+	"x-stainless-os",
+	"x-stainless-package-version",
+	"x-stainless-retry-count",
+	"x-stainless-runtime",
+	"x-stainless-runtime-version",
+	"X-Conversation-ID",
+	"X-Agent-Purpose",
+	"X-IDE-Type",
+	"X-IDE-Name",
+	"X-IDE-Version",
+	"X-Agent-Intent",
+	"X-Agent-Runtime",
+	"X-Private-Data",
+	"x-codebuddy-request",
+	"X-Request-ID",
+	"X-Conversation-Message-ID",
+	"X-Conversation-Request-ID",
+	"X-Root-Request-ID",
+	"X-Agent-Type",
+	"baggage",
+	"traceparent",
+	"b3",
+	"X-B3-TraceId",
+	"X-B3-ParentSpanId",
+	"X-B3-SpanId",
+	"X-B3-Sampled",
+	"X-Trace-ID",
+	"Authorization",
+	"X-User-Id",
+	"X-Domain",
+	"X-Product",
+	"User-Agent",
+}
+
+// headOrderFor 按 Host + path 选顺序表。
+//
+// CodeBuddy 与 WorkBuddy 的 chat 路径同形（都是 /v2/chat/completions），
+// 只能靠 Host 区分；选不到表返回 nil（调用方原样返回，不重排）。
+func headOrderFor(host, path string) []string {
+	if isCodeBuddyHost(host) {
+		return codeBuddyHeadOrder
+	}
+	return officialHeadOrder[path]
+}
+
+func headRank(host, path string) (map[string]int, bool) {
+	order := headOrderFor(host, path)
+	if len(order) == 0 {
 		return nil, false
 	}
 	rank := make(map[string]int, len(order))
@@ -112,9 +170,9 @@ func headRank(path string) (map[string]int, bool) {
 //
 // 只翻转 ASCII 字母大小写，**字节长度不变**——reorderHeadBlock 末尾那条
 // 「长度必须相等」的兜底不变量因此依然成立。
-func headCanonical(path string) map[string]string {
-	order, ok := officialHeadOrder[path]
-	if !ok {
+func headCanonical(host, path string) map[string]string {
+	order := headOrderFor(host, path)
+	if len(order) == 0 {
 		return nil
 	}
 	canon := make(map[string]string, len(order))
@@ -177,20 +235,15 @@ func reorderHeadBlock(block []byte) []byte {
 		return block // 只有请求行，没有头：无事可做
 	}
 	path := requestPathOf(lines[0])
-	// Host 分流：CodeBuddy（www.codebuddy.ai）走**同一路径** /v2/chat/completions，
-	// 但头族完全不同（CLI 形态，无 X-Device-Token/Accept-Language/X-Domain，
-	// 多出 X-Agent-*/X-Conversation-* 全套）。用 WorkBuddy 的 44 头表去重排它，
-	// 等于把 CodeBuddy 请求改造成 WorkBuddy 形态——比不重排更糟。
-	// 目前没有 CodeBuddy 的权威顺序表（只有一份 CLI 抓包，样本不足），故**原样返回**，
-	// 由 Go transport 的自然顺序发出。将来补表时在这里换成 headRankFor(host, path)。
-	if isCodeBuddyHost(hostOfHead(lines)) {
-		return block
-	}
-	rank, ok := headRank(path)
+	// Host 分流：CodeBuddy 与 WorkBuddy 的 chat 路径同形，只能靠 Host 选顺序表。
+	// 两套表完全不同（CodeBuddy = node SDK 形态，WorkBuddy = 桌面渲染器形态），
+	// 混用会把请求改造成另一个产品的形态——比不重排更糟。
+	host := hostOfHead(lines)
+	rank, ok := headRank(host, path)
 	if !ok {
 		return block
 	}
-	canon := headCanonical(path)
+	canon := headCanonical(host, path)
 
 	type entry struct {
 		raw  string

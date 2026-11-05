@@ -235,10 +235,10 @@ func TestReorderHeadBlockIdempotent(t *testing.T) {
 // TestReorderHeadBlockPathFamilies 只有 chat 路径进表；其他路径（含带 query 的
 // chat）走原生顺序——「没有抓包证据就不猜」。
 func TestReorderHeadBlockPathFamilies(t *testing.T) {
-	if _, ok := headRank("/v2/report"); ok {
+	if _, ok := headRank("www.workbuddy.ai", "/v2/report"); ok {
 		t.Error("/v2/report 不该出现在顺序表里（无抓包证据）")
 	}
-	if _, ok := headRank("/v2/chat/completions"); !ok {
+	if _, ok := headRank("www.workbuddy.ai", "/v2/chat/completions"); !ok {
 		t.Fatal("/v2/chat/completions 必须在表里")
 	}
 	for _, target := range []string{

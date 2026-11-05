@@ -61,6 +61,17 @@ func (c *Client) CodeBuddyChatHeaders(req *http.Request, a *auth.Auth, meta Chat
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	req.Header.Set("User-Agent", codeBuddyUA)
+	// x-stainless-* 系列：官方 CLI 用 node SDK，这 7 个头是 SDK 自动加的。
+	// 抓包逐字确认（2026-11-05）：arch=x64 / lang=js / os=Linux / package-version=7.39.0 /
+	// retry-count=0 / runtime=node / runtime-version=v22.23.2。
+	// 注意 os 是 **Linux**——官方 CLI 就跑在 Linux 上；网关同环境，无需伪造 Windows。
+	req.Header.Set("x-stainless-arch", "x64")
+	req.Header.Set("x-stainless-lang", "js")
+	req.Header.Set("x-stainless-os", "linux")
+	req.Header.Set("x-stainless-package-version", "7.39.0")
+	req.Header.Set("x-stainless-retry-count", "0")
+	req.Header.Set("x-stainless-runtime", "node")
+	req.Header.Set("x-stainless-runtime-version", "v22.23.2")
 	// x-codebuddy-request：真机全小写，但 Go 会规范化成 X-Codebuddy-Request；
 	// 服务端按大小写不敏感匹配，此处保持规范拼写，字节层由 headorder 还原（如启用）。
 	req.Header.Set("X-CodeBuddy-Request", "1")
@@ -104,6 +115,23 @@ func (c *Client) CodeBuddyChatHeaders(req *http.Request, a *auth.Auth, meta Chat
 	}
 	req.Header.Set("traceparent", "00-"+trace+"-"+creq[:16]+"-01")
 	req.Header.Set("X-Trace-ID", trace)
+	// B3 多段追踪：官方 CLI 同时发 b3 单串 + 4 个 X-B3-* 分段（抓包逐字确认）。
+	span := creq[:16]
+	parent := creq[16:32]
+	if len(parent) < 16 {
+		parent = creq[:16]
+	}
+	req.Header.Set("b3", trace+"-"+span+"-1-"+parent)
+	req.Header.Set("X-B3-TraceId", trace)
+	req.Header.Set("X-B3-ParentSpanId", parent)
+	req.Header.Set("X-B3-SpanId", span)
+	req.Header.Set("X-B3-Sampled", "1")
+	// X-Domain：**反直觉但真实**——官方 CLI 连 www.codebuddy.ai 时，X-Domain 发的仍是
+	// 账号归属域 www.workbuddy.ai（抓包逐字确认）。即该头表达的是「账号属于哪个产品域」，
+	// 不是「请求打到哪个 host」。这里按账号域回落，global 缺省 workbuddy.ai。
+	req.Header.Set("X-Domain", codeBuddyDomainOf(a))
+	// Connection：官方 CLI 显式发 keep-alive（Go transport 默认不写这个头）。
+	req.Header.Set("Connection", "keep-alive")
 }
 
 // ensureCodeBuddySystem 保证 CodeBuddy 请求体首条消息是 system。
@@ -220,4 +248,56 @@ func (c *Client) fetchCodeBuddyModels(a *auth.Auth) ([]ModelInfo, error) {
 		out = append(out, m.modelInfo())
 	}
 	return out, nil
+}
+
+// codeBuddyDomainOf 出站 X-Domain 的取值：账号落盘 domain 优先，否则按 realm 回落。
+//
+// 注意与请求 host 无关：官方 CLI 打 www.codebuddy.ai 时 X-Domain 仍是账号域
+// （workbuddy.ai）。这条是抓包实测，不是推测。
+func codeBuddyDomainOf(a *auth.Auth) string {
+	if a != nil {
+		if d := strings.TrimSpace(a.DomainValue()); d != "" {
+			return d
+		}
+	}
+	return "www.workbuddy.ai"
+}
+
+// prepareCodeBuddyBody 组装 CodeBuddy 通道的出站 body。
+//
+// 与 WorkBuddy 的 prepareBody 差异（2026-11-05 抓官方 CLI 2.180.0 逐字段对比）：
+//
+//	去掉 prompt_cache_key  —— 我们为 WorkBuddy 侧加的费用优化键，官方 CLI **不发**
+//	去掉 thinking          —— 我们为 DeepSeek 模型加的开关，官方 CLI **不发**
+//	                          （官方用 reasoning_effort + reasoning_summary 表达）
+//	补上 cache_retention / verbosity / reasoning_summary / temperature
+//	                          —— 官方 CLI 恒发这四个，缺了就是形态差异
+//
+// effort 档位降级仍沿用 WorkBuddy 那套（normalizeReasoningEffort），因为
+// CodeBuddy 目录与 WorkBuddy 目录对同一模型给出的档位集合不同，必须按目标域降级。
+func (c *Client) prepareCodeBuddyBody(body []byte, realm, uid, conversationID string) []byte {
+	body = c.prepareBody(body, realm, uid, conversationID)
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body // 非对象形态：原样返回（不猜）
+	}
+	delete(obj, "prompt_cache_key")
+	delete(obj, "thinking")
+	if _, has := obj["cache_retention"]; !has {
+		obj["cache_retention"] = "long"
+	}
+	if _, has := obj["verbosity"]; !has {
+		obj["verbosity"] = "high"
+	}
+	if _, has := obj["reasoning_summary"]; !has {
+		obj["reasoning_summary"] = "auto"
+	}
+	if _, has := obj["temperature"]; !has {
+		obj["temperature"] = 1
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return out
 }

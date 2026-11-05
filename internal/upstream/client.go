@@ -1146,12 +1146,16 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	prepared := c.prepareBody(body, a.Realm(), a.UID, meta.ConversationID)
+	var prepared []byte
 	if meta.Product == "cb" {
-		// CodeBuddy 通道：首条必须是 system（缺则上游 400 code 11-128）。
-		prepared = ensureCodeBuddySystem(prepared)
-	} else if c.globalOn(a) {
-		prepared = ensureConsoleSystem(prepared)
+		// CodeBuddy 通道：body 字段集与 WorkBuddy 不同（见 prepareCodeBuddyBody），
+		// 且首条必须是 system（缺则上游 400 code 11-128）。
+		prepared = ensureCodeBuddySystem(c.prepareCodeBuddyBody(body, a.Realm(), a.UID, meta.ConversationID))
+	} else {
+		prepared = c.prepareBody(body, a.Realm(), a.UID, meta.ConversationID)
+		if c.globalOn(a) {
+			prepared = ensureConsoleSystem(prepared)
+		}
 	}
 	// reqCtx 的 cancel 在每个出口显式调用（Do 失败 / ≥400 / 成功分支移交 monitorBody），
 	// 循环本身各分支必 return——无循环尾兜底代码（此前外层 var cancel 从未赋值 +
