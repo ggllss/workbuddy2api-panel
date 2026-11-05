@@ -409,19 +409,70 @@ setTimeout(() => {
 }, 0);
 
 /* ── 账号池 ───────────────────────────────────────────────────────── */
+// 账号池：默认按域排序（国内版在前、国际版在后），支持按域 / 状态 / 模型锁叠加筛选。
+// 数据源是 overview 的完整列表（accAll），筛选与排序全在前端做——账号量级只有几十个，
+// 不必让后端加参数，也不会因为切筛选条件多打一次上游。
+let accAll = [];
+let accFilter = { realm: '', status: '', lock: '' };
+
+// accStatusOf 与表格里状态标签同一口径：禁用 > 暂停 > 冷却 > 可用。
+// 抽出来是为了让筛选和标签永远不会说出互相矛盾的话（历史上出现过「可用」与
+// 429 冷却同时显示的问题）。
+function accStatusOf(s) {
+  if (s.disabled) return 'off';
+  if (s.paused) return 'paused';
+  const bl = (new Date(s.breaker_until || 0) - Date.now()) / 1000;
+  const dg = (new Date(s.degrade_until || 0) - Date.now()) / 1000;
+  const cool = Math.max(s.cool_remaining_sec || 0, bl > 0 ? bl : 0, dg > 0 ? dg : 0);
+  return cool > 0 ? 'cool' : 'ok';
+}
+
+// realmTag 域标签：仅在混合域池里标注，让「按域排序」的分组边界肉眼可见。
+function realmTag(s, mixed) {
+  if (!mixed) return '';
+  return ' <span class="realm-tag">' + (s.realm === 'global' ? '国际版' : '国内版') + '</span>';
+}
+
 function renderAccounts(list) {
+  accAll = list || [];
+  renderAccBody();
+}
+
+function renderAccBody() {
   // 别名就地编辑进行中：整表重写 innerHTML 会把正在编辑的 <input> 移出 DOM，浏览器随即
   // 触发 blur，半成品会被当作「用户点走了」提交。这里直接跳过本次重绘（表格数据停更几秒
   // 可接受），编辑结束（保存 / 取消）时 commit/restore 会立刻 loadOverview(true) 补一次。
   if (aliasEditing) return;
   const tb = $('accBody');
-  if (!list.length) {
+  const noteEl = $('accFilterNote');
+  if (!accAll.length) {
     tb.innerHTML = '<tr><td colspan="9"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>';
+    if (noteEl) noteEl.textContent = '';
+    return;
+  }
+  const hasLock = s => (s.rate_limited_models || []).length > 0;
+  const rows = accAll.filter(s => {
+    if (accFilter.realm && s.realm !== accFilter.realm) return false;
+    if (accFilter.status && accStatusOf(s) !== accFilter.status) return false;
+    if (accFilter.lock === 'locked' && !hasLock(s)) return false;
+    if (accFilter.lock === 'free' && hasLock(s)) return false;
+    return true;
+  });
+  // 默认按域排序：国内版在前、国际版在后。Array.sort 稳定，同域内保持后端原序——
+  // 后端顺序承载选号优先级语义，前端不得打乱。
+  rows.sort((a, b) => (a.realm === 'global' ? 1 : 0) - (b.realm === 'global' ? 1 : 0));
+  if (noteEl) noteEl.textContent = rows.length === accAll.length ? '' : '筛选后 ' + rows.length + ' / ' + accAll.length;
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="9"><div class="empty">没有账号匹配当前筛选条件</div></td></tr>';
     return;
   }
   // 有总额度（credits_total）→ 进度条按自身 剩余/总额 百分比；旧数据无总额 → 退回池内最高=100%
-  const maxCred = Math.max(1, ...list.map(s => s.credits || 0));
-  tb.innerHTML = list.map(s => {
+  // 进度条基准取**全池**最高分，不随筛选缩放——否则勾一个筛选条长就跳一次，
+  // 与「相对池内最高」的语义也对不上。
+  const maxCred = Math.max(1, ...accAll.map(s => s.credits || 0));
+  // 只有池里同时存在两个域时才标注域——纯单域池每行挂个「国内版」纯属噪音。
+  const mixedRealm = new Set(accAll.map(s => s.realm || 'cn')).size > 1;
+  tb.innerHTML = rows.map(s => {
     const bl = (new Date(s.breaker_until || 0) - Date.now()) / 1000;
     const dg = (new Date(s.degrade_until || 0) - Date.now()) / 1000;
     const cool = Math.max(s.cool_remaining_sec || 0, bl > 0 ? bl : 0, dg > 0 ? dg : 0);
@@ -479,7 +530,7 @@ function renderAccounts(list) {
     const nmTitle = '点击设置别名' + (alias && s.nickname ? '（上游昵称：' + s.nickname + '）' : '');
     return '<tr class="' + cls + '" title="uid: ' + esc(s.uid) + '">' +
       '<td class="mark" aria-hidden="true"><i></i></td>' +
-      '<td class="who"><div class="nm editable" data-edit="alias" data-u="' + esc(s.uid) + '" data-alias="' + esc(alias) + '" title="' + esc(nmTitle) + '">' + (alias || s.nickname ? esc(alias || s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + (s.enterprise ? ' <span class="realm-tag">企业版</span>' : '') + '</div><div class="id">' + esc(short) + '</div></td>' +
+      '<td class="who"><div class="nm editable" data-edit="alias" data-u="' + esc(s.uid) + '" data-alias="' + esc(alias) + '" title="' + esc(nmTitle) + '">' + (alias || s.nickname ? esc(alias || s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + realmTag(s, mixedRealm) + (s.enterprise ? ' <span class="realm-tag">企业版</span>' : '') + '</div><div class="id">' + esc(short) + '</div></td>' +
       '<td>' + tag + note + rateLimits + '</td>' +
       '<td class="cred" title="' + esc(credTip) + '"><div class="n">' + cred + '</div><div class="bar"><i style="width:' + pct + '%"></i></div></td>' +
       '<td class="num">' + (s.success_count || 0) + ' <span style="color:var(--ink-3)">/</span> <span style="color:var(--bad)">' + (s.err_total || 0) + '</span></td>' +
@@ -507,6 +558,20 @@ function renderAccounts(list) {
         '<button class="xs ghost danger" data-a="remove" data-u="' + esc(s.uid) + '">移除</button>' +
       '</td></tr>';
   }).join('');
+}
+
+// 筛选控件：三个下拉可任意叠加，改动即时重排（纯前端，不打上游）。
+for (const [id, key] of [['accRealm', 'realm'], ['accStatus', 'status'], ['accLock', 'lock']]) {
+  const el = $(id);
+  if (!el) continue;
+  el.onchange = () => { accFilter[key] = el.value; renderAccBody(); };
+}
+if ($('accFilterReset')) {
+  $('accFilterReset').onclick = () => {
+    accFilter = { realm: '', status: '', lock: '' };
+    $('accRealm').value = ''; $('accStatus').value = ''; $('accLock').value = '';
+    renderAccBody();
+  };
 }
 
 // renderModelLocks 模型锁池：哪些模型不能用、锁了几个号、还要锁多久。
