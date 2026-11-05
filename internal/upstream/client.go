@@ -1262,6 +1262,27 @@ type dynModelEntry struct {
 	} `json:"reasoning"`
 }
 
+// normalizeCredits 归一化上游 `credits` 字段的原文。
+//
+// 上游自己就不一致：同一份 /v3/config 里既有 `"x1.33"`，也有 `"x1.33 credits"`，
+// 还有空串/缺字段（2026-11-05 实测三个 UA 的并集：23 个模型里 1 个带 credits 后缀、
+// 2 个为 null；CLI UA 那条有 3 个带后缀、1 个空串）。**这是上游的数据形态，
+// 不是我们解析错**——所以"重新获取"不会变准，只能在展示前归一化。
+//
+// 只影响展示（/panel/api/models 的 credits 列、/v1/models 的 credits 与描述前缀）；
+// 计费与选号走的是 modelRates 表，与这里无关。
+func normalizeCredits(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	const suffix = "credits"
+	if len(s) >= len(suffix) && strings.EqualFold(s[len(s)-len(suffix):], suffix) {
+		s = strings.TrimSpace(s[:len(s)-len(suffix)])
+	}
+	return s
+}
+
 // modelInfo 按解析条目构造 ModelInfo（dynEntry→ModelInfo 映射的单一事实来源）。
 // defaultEffort 新老双键兼容：defaultEffort 优先，缺省回落 effort。
 func (m dynModelEntry) modelInfo() ModelInfo {
@@ -1278,7 +1299,7 @@ func (m dynModelEntry) modelInfo() ModelInfo {
 		DefaultEffort:      def,
 		SupportsImages:     m.SupportsImages,
 		Description:        m.Description,
-		Credits:            m.Credits,
+		Credits:            normalizeCredits(m.Credits),
 		Tags:               m.Tags,
 		Vendor:             m.Vendor,
 		IsDefault:          m.IsDefault,
