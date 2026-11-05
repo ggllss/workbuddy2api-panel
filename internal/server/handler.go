@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 
 	"sync"
@@ -642,16 +643,88 @@ func (h *Handler) autoCandidateOrder() []string {
 	}
 	seq := autoRotateSeq.Add(1)
 	out := make([]string, 0, len(groups)*2)
-	for gi, g := range groups {
-		n := len(g)
-		if n == 0 {
-			continue
+	for _, g := range groups {
+		out = append(out, h.orderGroup(g, seq)...)
+	}
+	return out
+}
+
+// orderGroup 组内按「各成员当前可用账号数」加权轮转，排在首位的就是本次要用的通道。
+//
+// 权重口径 = 该 (realm, 模型) 下此刻可用的账号数（pool.AvailableUIDsForModelRealm，
+// 过滤条件与 Pick 完全一致：healthyForModel + inFlightFull）。
+//
+// 为什么不能按成员均分：cn 1 个号 + global 4 个号时，按成员轮转会让两个域各吃
+// 50%，等于 CN 那一个号扛了 5 个号的量、global 四个号各只吃 12.5%——账号之间
+// 冷热严重不均。按账号数加权后是 1:4，每个账号吃到的流量才相等；
+// global 临时掉一个号，权重自动变成 1:3，无需任何配置变更。
+func (h *Handler) orderGroup(g []string, seq uint64) []string {
+	if len(g) <= 1 {
+		return g
+	}
+	weights := make([]int, len(g))
+	anyUsable := false
+	for i, m := range g {
+		realm, bare := resolveModel(m)
+		weights[i] = len(h.cfg.Pool.AvailableUIDsForModelRealm(bare, realm))
+		if weights[i] > 0 {
+			anyUsable = true
 		}
-		// 起点按请求序号轮转，并按组序错开：多组同时轮转时首轮不会全撞同一域。
-		start := int((seq + uint64(gi)) % uint64(n))
-		for k := 0; k < n; k++ {
-			out = append(out, g[(start+k)%n])
+	}
+	if !anyUsable {
+		// 全组都没号：原样返回配置顺序，让上层按既有判据降级到下一组。
+		return g
+	}
+	cycle := weightedCycle(weights)
+	if len(cycle) == 0 {
+		return g
+	}
+	start := cycle[int(seq%uint64(len(cycle)))]
+	out := make([]string, 0, len(g))
+	out = append(out, g[start])
+	// 其余成员只作兜底（首选通道临时无号时才会用到）：权重大的排前面。
+	rest := make([]int, 0, len(g)-1)
+	for i := range g {
+		if i != start {
+			rest = append(rest, i)
 		}
+	}
+	sort.SliceStable(rest, func(a, b int) bool { return weights[rest[a]] > weights[rest[b]] })
+	for _, i := range rest {
+		out = append(out, g[i])
+	}
+	return out
+}
+
+// weightedCycle 生成一个长度 = 权重之和、各成员出现次数 = 其权重的轮转表，
+// 且排布**均匀交错**（平滑加权轮询，Nginx 同款）：权重 1:4 得到
+// g g c g g 而不是 c g g g g —— 后者的前四个请求会全打到 global。
+func weightedCycle(weights []int) []int {
+	total := 0
+	for _, w := range weights {
+		total += w
+	}
+	if total == 0 {
+		return nil
+	}
+	cur := make([]int, len(weights))
+	out := make([]int, 0, total)
+	for k := 0; k < total; k++ {
+		best := -1
+		for i, w := range weights {
+			if w == 0 {
+				continue
+			}
+			cur[i] += w
+			if best < 0 || cur[i] > cur[best] {
+				best = i
+			}
+		}
+		if best < 0 {
+			break
+		}
+		cur[best] -= total
+		out = append(out, best)
 	}
 	return out
 }
