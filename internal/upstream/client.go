@@ -677,6 +677,11 @@ type Client struct {
 	ChatBaseGlobal    string
 	BillingBaseGlobal string
 
+	// CodeBuddyBase CodeBuddy 产品通道（www.codebuddy.ai）的出站 base。
+	// 空 = 缺省默认 https://www.codebuddy.ai。仅被带 `@cb` 后缀的模型使用，
+	// WorkBuddy 通道完全不读它（见 codebuddy.go）。
+	CodeBuddyBase string
+
 	// GlobalEnabled 是否启用 global realm 路由（config global.enabled，缺省 true）。
 	// false 时即便用户 auth 写了 realm=global 也**不**路由到 global base——
 	// chatBase/billingBase 返回 CN base，路径也走 CN（双保险，与 auth.Realm() 的开关闸呼应）。
@@ -855,6 +860,18 @@ const chatCompletionsPath = "/v2/chat/completions"
 // 路径，此注释即"坏了再说"的锚点）；cn → [/v2]（单元素，现状）。
 func (c *Client) chatPaths(a *auth.Auth) []string {
 	return []string{chatCompletionsPath}
+}
+
+// chatPathsFor 按产品通道返回 chat 路径序列。
+//
+// CodeBuddy 与 WorkBuddy 的 chat 路径**恰好同形**（都是 /v2/chat/completions），
+// 差别只在域名与头族。这里仍单独成函数：一是调用点语义自解释，二是将来若
+// CodeBuddy 侧路径分叉（如新增 /console 兜底），改这一处即可。
+func (c *Client) chatPathsFor(a *auth.Auth, product string) []string {
+	if product == "cb" {
+		return []string{codeBuddyChatPath}
+	}
+	return c.chatPaths(a)
 }
 
 // billing 域端点路径（billingBase + path）。balance/checkin 与 report（report.go）同域，
@@ -1130,14 +1147,21 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		ctx = context.Background()
 	}
 	prepared := c.prepareBody(body, a.Realm(), a.UID, meta.ConversationID)
-	if c.globalOn(a) {
+	if meta.Product == "cb" {
+		// CodeBuddy 通道：首条必须是 system（缺则上游 400 code 11-128）。
+		prepared = ensureCodeBuddySystem(prepared)
+	} else if c.globalOn(a) {
 		prepared = ensureConsoleSystem(prepared)
 	}
 	// reqCtx 的 cancel 在每个出口显式调用（Do 失败 / ≥400 / 成功分支移交 monitorBody），
 	// 循环本身各分支必 return——无循环尾兜底代码（此前外层 var cancel 从未赋值 +
 	// 尾部不可达 cancel() 是潜伏 nil-panic，已删；chatPaths 恒非空由构造保证）。
-	for _, path := range c.chatPaths(a) {
-		endpoint := c.chatBase(a) + path
+	for _, path := range c.chatPathsFor(a, meta.Product) {
+		base := c.chatBase(a)
+		if meta.Product == "cb" {
+			base = c.codeBuddyChatBase()
+		}
+		endpoint := base + path
 		req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(prepared))
 		if err != nil {
 			return nil, 0, nil, err
@@ -1145,7 +1169,11 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		// 大请求体按官方形态 gzip（真机 48841B/53K–80K 全部压缩，2458B 未压）。
 		// 必须在 NewRequest 之后、Do 之前：替换 Body 并补 Content-Encoding。
 		c.maybeCompressRequest(req, prepared)
-		c.ChatHeaders(req, a, clientIP, meta)
+		if meta.Product == "cb" {
+			c.CodeBuddyChatHeaders(req, a, meta)
+		} else {
+			c.ChatHeaders(req, a, clientIP, meta)
+		}
 		// 从调用方 ctx 派生：保留取消传播（父 ctx 取消 → 本 ctx 取消），
 		// 同时 monitorBody.Close 仍能独立 cancel 本分支（空闲掐流）。
 		reqCtx, cancel := context.WithCancel(ctx)

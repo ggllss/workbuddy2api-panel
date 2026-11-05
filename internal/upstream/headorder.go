@@ -177,6 +177,15 @@ func reorderHeadBlock(block []byte) []byte {
 		return block // 只有请求行，没有头：无事可做
 	}
 	path := requestPathOf(lines[0])
+	// Host 分流：CodeBuddy（www.codebuddy.ai）走**同一路径** /v2/chat/completions，
+	// 但头族完全不同（CLI 形态，无 X-Device-Token/Accept-Language/X-Domain，
+	// 多出 X-Agent-*/X-Conversation-* 全套）。用 WorkBuddy 的 44 头表去重排它，
+	// 等于把 CodeBuddy 请求改造成 WorkBuddy 形态——比不重排更糟。
+	// 目前没有 CodeBuddy 的权威顺序表（只有一份 CLI 抓包，样本不足），故**原样返回**，
+	// 由 Go transport 的自然顺序发出。将来补表时在这里换成 headRankFor(host, path)。
+	if isCodeBuddyHost(hostOfHead(lines)) {
+		return block
+	}
 	rank, ok := headRank(path)
 	if !ok {
 		return block
@@ -235,4 +244,19 @@ func reorderHeadBlock(block []byte) []byte {
 		return block
 	}
 	return out
+}
+
+// hostOfHead 从请求头行里取 Host 值（小写比较用，返回原样）。
+// 取不到返回空串——调用方按「非 CodeBuddy」处理，保持既有行为。
+func hostOfHead(lines []string) string {
+	for _, ln := range lines[1:] {
+		colon := strings.IndexByte(ln, ':')
+		if colon <= 0 {
+			continue
+		}
+		if strings.EqualFold(ln[:colon], "Host") {
+			return strings.TrimSpace(ln[colon+1:])
+		}
+	}
+	return ""
 }

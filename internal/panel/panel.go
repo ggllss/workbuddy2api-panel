@@ -356,6 +356,16 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 					for _, mi := range infos {
 						out = append(out, panelModelEntry("global", mi, efforts[mi.ID], defaults[mi.ID], p.cfg.Upstream.HTTP))
 					}
+					// CodeBuddy 产品通道目录（www.codebuddy.ai，CLI 面 28 个模型）：
+					// id 带 @cb 后缀，与 WorkBuddy 同名模型并列展示——两边倍率/档位
+					// 可能不同（CodeBuddy 侧 deepseek-v4.1-flash 标价 x0.00），
+					// 并列才能看出差异，也才不会漏掉 CodeBuddy 独有的 5 个模型。
+					for _, mi := range p.cfg.Upstream.FetchCodeBuddyModelInfos(acct) {
+						e := panelModelEntry("global", mi, mi.Efforts, mi.DefaultEffort, p.cfg.Upstream.HTTP)
+						e["id"] = "global:" + mi.ID + "@cb"
+						e["product"] = "codebuddy"
+						out = append(out, e)
+					}
 				}
 			}
 		}

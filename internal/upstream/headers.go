@@ -273,6 +273,9 @@ type ChatMeta struct {
 	ConversationID        string // X-Conversation-ID：body 提取的入站值，空则不发（透传优先，不伪造）
 	ConversationRequestID string // X-Conversation-Request-ID / X-Root-Request-ID：聚合主键，必发
 	TraceID               string // X-Trace-ID：入站透传值，空则回落 conversationRequestID
+	// Product 产品通道："cb" = CodeBuddy（www.codebuddy.ai + CLI 头族），
+	// "" = WorkBuddy（现状）。与 realm 正交，见 server.Product。
+	Product string
 }
 
 // ChatHeaders 在 common 之上加 chat 专属的账号头。

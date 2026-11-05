@@ -487,6 +487,37 @@ func (h *Handler) modelList() []map[string]any {
 			"description": fmt.Sprintf("全量 auto：按控制台「全量 auto 候选模型」(auto.candidates) 的顺序逐个尝试 %d 个候选模型，当前候选全池不可用时降级到下一个", len(cands)),
 		})
 	}
+	// CodeBuddy 产品通道模型：id 带 @cb 后缀（见 server.Product）。
+	//
+	// 与 WorkBuddy 目录**并列输出**而不是互斥：两个产品共用账号与积分，
+	// 同名模型在两边可能有不同倍率/档位（2026-11-05 实测 CodeBuddy 目录里
+	// deepseek-v4.1-flash = x0.00 而 WorkBuddy 侧同名模型按实际扣费走），
+	// 并列才能让调用方按需选择，也避免把 CodeBuddy 独有模型（glm-5.2/gpt-5.4/
+	// gpt-5.5/hy4-preview/deepseek-v4.1-flash）丢掉。
+	if h.cfg.GlobalEnabled {
+		if ids, acct := h.fetchGlobalModels(); len(ids) > 0 && acct != nil {
+			for _, mi := range h.cfg.Upstream.FetchCodeBuddyModelInfos(acct) {
+				entry := map[string]any{
+					"id":       "global:" + mi.ID + codeBuddySuffix,
+					"object":   "model",
+					"created":  1753600000,
+					"owned_by": "codebuddy",
+				}
+				entry["context_length"] = upstream.ContextWindowListingV4(mi.ID, mi.ContextWindow, h.cfg.Upstream.HTTP)
+				if mo, ok := upstream.MaxOutputTokensListingV4(mi.ID, mi.MaxTokens, h.cfg.Upstream.HTTP); ok {
+					entry["max_output_tokens"] = mo
+				}
+				entry = applyModelInfoFields(entry, mi)
+				if mi.Efforts != nil {
+					entry["reasoning_supported_efforts"] = mi.Efforts
+					if mi.DefaultEffort != "" {
+						entry["reasoning_default_effort"] = mi.DefaultEffort
+					}
+				}
+				out = append(out, entry)
+			}
+		}
+	}
 	return out
 }
 
@@ -833,7 +864,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if convID == "" {
 			convID = sessKey
 		}
-		chatMeta := upstream.ChatMeta{ConversationID: convID}
+		// 产品通道：模型名带 @cb 后缀 → CodeBuddy（www.codebuddy.ai + CLI 头族）。
+		// 与 realm 正交，故单独一维，不塞进 realm。
+		chatMeta := upstream.ChatMeta{ConversationID: convID, Product: Product(peek.Model)}
 		if v := r.Header.Get("X-Conversation-Request-ID"); v != "" {
 			chatMeta.ConversationRequestID = v
 		} else if turnKey != "" && sessKey != "" {
