@@ -44,9 +44,11 @@ func TestAddAndTotals(t *testing.T) {
 		s.CreditByAccount[0].CreditSamples != 1 || s.CreditByAccount[0].CreditsPer1MTokens != 10000 {
 		t.Fatalf("credit_by_account = %+v, want one uid1 row", s.CreditByAccount)
 	}
-	if len(s.CreditByModel) != 1 || s.CreditByModel[0].Key != "glm-5.2" ||
+	// Key 现在是 **realm:模型**（2026-11-05 改）：同名模型在 cn/global 两域、以及
+	// WorkBuddy/CodeBuddy 两产品（cb 后缀）下是不同计费实体，模型列必须能区分。
+	if len(s.CreditByModel) != 1 || s.CreditByModel[0].Key != "cn:glm-5.2" ||
 		s.CreditByModel[0].Rate != "0.05" || s.CreditByModel[0].CreditsPer1MTokens != 10000 {
-		t.Fatalf("credit_by_model = %+v, want one glm-5.2 rate=0.05 row", s.CreditByModel)
+		t.Fatalf("credit_by_model = %+v, want one cn:glm-5.2 rate=0.05 row", s.CreditByModel)
 	}
 }
 
@@ -147,7 +149,7 @@ func TestCreditDimensionsRateGrouping(t *testing.T) {
 	if len(s.CreditByAccount) != 2 || len(s.CreditByModel) != 2 {
 		t.Fatalf("dimensions accounts=%+v models=%+v, want 2 accounts and 2 model-rate rows", s.CreditByAccount, s.CreditByModel)
 	}
-	if s.CreditByModel[0].Key != "glm-5.2" || s.CreditByModel[0].Rate != "0.8" ||
+	if s.CreditByModel[0].Key != "cn:glm-5.2" || s.CreditByModel[0].Rate != "0.8" ||
 		s.CreditByModel[0].Credits != 6 || s.CreditByModel[0].CreditTokens != 300 {
 		t.Fatalf("first model row = %+v, want rate=0.8 credits=6 tokens=300", s.CreditByModel[0])
 	}

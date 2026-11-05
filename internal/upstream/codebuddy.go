@@ -38,6 +38,9 @@ const (
 	codeBuddyUA = "CLI/2.180.0 CodeBuddy/2.180.0"
 	// codeBuddyIDEVersion X-IDE-Version 的值，与 UA 里的版本号一致。
 	codeBuddyIDEVersion = "2.180.0"
+	// codeBuddySuffixForRate 模型名的产品通道后缀（与 server 包的 codeBuddySuffix 同值）。
+	// 两包不能互相 import（upstream ← server 是单向依赖），故各自定义一份常量。
+	codeBuddySuffixForRate = "@cb"
 )
 
 // codeBuddyChatBase 生效的 CodeBuddy 出站 base。

@@ -626,6 +626,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// bareModel 用于选号/粘性/出站 body 重写（前缀是网关侧路由协议，上游只认裸名）。
 	// 裸名 → ("cn", 原串)，CN 现状零回归。
 	realm, bareModel := resolveModel(peek.Model)
+	// product 产品通道（"cb" = CodeBuddy）。与 realm 正交，单独一维。
+	// 在候选循环外声明、循环内按候选重算——recordAttempt 闭包在循环外定义，
+	// 但它捕获变量、调用时取值，所以这里声明即可让闭包读到本次候选的值。
+	product := Product(peek.Model)
 	modelRate := ""
 	if h.cfg.Upstream != nil {
 		modelRate = h.cfg.Upstream.ModelRate(realm, bareModel)
@@ -738,7 +742,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		} else if delta.HasPromptTokens || delta.HasCompletionTokens {
 			st.totalTokens = st.promptTokens + st.completionTokens
 		}
-		delta.Model = bareModel
+		// 用量台账按**通道限定名**记账（裸名 + 产品后缀），否则两个通道的同名模型
+		// 会被合并成一条，积分扣除历史里看不出是哪个通道扣的（2026-11-05 用户要求）。
+		// 注意：pool 的 modelCost（积分保底用）仍按裸名键——那是内部判定，且两个
+		// 通道对同一模型都是「收费/免费」同向，合并不会改变保底结论。
+		delta.Model = usageModelName(bareModel, product)
 		if delta.Model == "" {
 			delta.Model = peek.Model
 		}
@@ -818,6 +826,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	for candIdx, candModel := range candidateModels {
 		if autoAll {
 			realm, bareModel = resolveModel(candModel)
+			product = Product(candModel)
 			modelRate = ""
 			if h.cfg.Upstream != nil {
 				modelRate = h.cfg.Upstream.ModelRate(realm, bareModel)
@@ -870,10 +879,6 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// **必须按当前候选算，不能用 peek.Model**：auto:all 的 peek.Model 是 "auto:all"
 		// （无后缀 → Product 恒空），若用它，降级到 @cb 候选时仍走 WorkBuddy 通道——
 		// 候选上的后缀被静默忽略。这是 auto 与 @cb 组合时的真实缺陷（2026-11-05 发现）。
-		product := Product(peek.Model)
-		if autoAll {
-			product = Product(candModel)
-		}
 		chatMeta := upstream.ChatMeta{ConversationID: convID, Product: product}
 		if v := r.Header.Get("X-Conversation-Request-ID"); v != "" {
 			chatMeta.ConversationRequestID = v
@@ -1806,4 +1811,19 @@ func (h *Handler) hintOf(kind upstream.ErrKind, body, bareModel string, hasImage
 		msg = uerr.Msg
 	}
 	return upstream.GatewayHint(kind, msg, h.hintContext(bareModel, hasImage))
+}
+
+// usageModelName 用量台账/日志展示用的模型名：裸名 + 产品通道后缀。
+//
+// 为什么需要：CodeBuddy（cb 后缀）与 WorkBuddy 是两个产品，共用账号与积分，但
+// 同名模型在两边是**不同的计费实体**。台账若只存裸名，两条通道的扣费会被合并成
+// 一行，积分扣除历史里无法区分——这正是用户 2026-11-05 提出的问题。
+func usageModelName(bare, product string) string {
+	if bare == "" {
+		return ""
+	}
+	if product == "cb" {
+		return bare + codeBuddySuffix
+	}
+	return bare
 }

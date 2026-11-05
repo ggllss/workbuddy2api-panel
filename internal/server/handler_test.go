@@ -295,8 +295,10 @@ func TestChatRecordsCreditForStreamAndSync(t *testing.T) {
 			if s.Totals.Credits != 1.25 || s.Totals.CreditSamples != 1 || s.Totals.CreditTokens != 10 || s.Totals.CreditsPer1MTokens != 125000 {
 				t.Fatalf("usage totals = %+v, want credit=1.25 tokens=10 ratio=125000", s.Totals)
 			}
+			// 模型列的 Key 是 **realm:模型**（2026-11-05 改）：同名模型在 cn/global
+			// 两域与 WorkBuddy/CodeBuddy 两产品下是不同计费实体，必须能区分。
 			if len(s.CreditByAccount) != 1 || s.CreditByAccount[0].Key != "u1" ||
-				len(s.CreditByModel) != 1 || s.CreditByModel[0].Key != "glm-5.2" {
+				len(s.CreditByModel) != 1 || s.CreditByModel[0].Key != "cn:glm-5.2" {
 				t.Fatalf("credit dimensions = %+v / %+v", s.CreditByAccount, s.CreditByModel)
 			}
 		})

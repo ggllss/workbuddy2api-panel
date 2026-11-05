@@ -149,13 +149,13 @@ type Delta struct {
 	HasCredit        bool
 	ModelRate        string
 	// CacheHitTokens / CacheMissTokens 前缀缓存命中/未命中观测（issue #92）。
-	HasCacheTokens   bool
-	CacheHitTokens   int64
-	CacheMissTokens  int64
-	LatencyMs        int64
-	HasLatency       bool
-	TokensPerSecond  float64
-	HasTPS           bool
+	HasCacheTokens  bool
+	CacheHitTokens  int64
+	CacheMissTokens int64
+	LatencyMs       int64
+	HasLatency      bool
+	TokensPerSecond float64
+	HasTPS          bool
 }
 
 // Add 记录一次请求尝试。
@@ -616,10 +616,13 @@ func (r *Recorder) SnapshotWindow(w Window, nicks map[string]string, currentRate
 			acctRealm[b.UID] = b.Realm
 		}
 
-		if modelAgg[b.Model] == nil {
-			modelAgg[b.Model] = &aggAcc{}
+		// 模型维度按 (realm, 模型) 分组：同名模型在 cn / global 两域、以及
+		// WorkBuddy / CodeBuddy 两个产品（cb 后缀）下都是不同的计费实体，合并会掩盖差异。
+		modelKeyDisp := displayUsageModel(b.Realm, b.Model)
+		if modelAgg[modelKeyDisp] == nil {
+			modelAgg[modelKeyDisp] = &aggAcc{}
 		}
-		modelAgg[b.Model].add(b)
+		modelAgg[modelKeyDisp].add(b)
 
 		if strings.HasPrefix(b.Scope, "h:") {
 			scope := strings.TrimPrefix(b.Scope, "h:")
@@ -657,10 +660,11 @@ func (r *Recorder) SnapshotWindow(w Window, nicks map[string]string, currentRate
 					rateCache[cacheKey] = rate
 				}
 			}
-			modelKey := model + "\x00" + rate
+			modelDisp := displayUsageModel(b.Realm, model)
+			modelKey := b.Realm + "\x00" + model + "\x00" + rate
 			cm := creditModelAgg[modelKey]
 			if cm == nil {
-				cm = &creditAcc{CreditAgg: CreditAgg{Key: model, Rate: rate}}
+				cm = &creditAcc{CreditAgg: CreditAgg{Key: modelDisp, Realm: b.Realm, Rate: rate}}
 				creditModelAgg[modelKey] = cm
 			}
 			cm.add(b)
@@ -792,4 +796,17 @@ func (r *Recorder) Describe() string {
 		}
 	}
 	return fmt.Sprintf("%d buckets, file %d bytes", n, sz)
+}
+
+// displayUsageModel 用量视图里模型列的展示名：realm:模型（含产品通道后缀）。
+//
+// 例：global:deepseek-v4.1-flash@cb —— 一眼能看出「哪个域、哪个产品通道、哪个模型」。
+// 三个维度缺一不可：realm 区分账号归属域，@cb 区分 CodeBuddy/WorkBuddy 两个产品
+// （同名模型两边是不同计费实体），裸名是上游真正认的模型标识。
+func displayUsageModel(realm, model string) string {
+	m := canonicalUsageModel(model) // 兼容历史桶里可能自带 realm 前缀
+	if realm == "" {
+		return m
+	}
+	return realm + ":" + m
 }

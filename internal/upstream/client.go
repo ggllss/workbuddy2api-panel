@@ -1795,6 +1795,11 @@ func (c *Client) ModelRate(realm, model string) string {
 	if c == nil || model == "" {
 		return ""
 	}
+	// 容忍产品通道后缀：用量台账按「通道限定名」（如 deepseek-v4.1-flash@cb）记账，
+	// 倍率表却按裸名索引。这里剥掉后缀再查，否则 @cb 模型的倍率回填恒为空。
+	// 注意：两个产品对同名模型可能有不同牌价，目前倍率表只有 WorkBuddy 目录的数据，
+	// 故 @cb 模型回填的是 WorkBuddy 侧倍率——展示用途，不参与计费。
+	model = strings.TrimSuffix(model, codeBuddySuffixForRate)
 	c.effortsMu.RLock()
 	defer c.effortsMu.RUnlock()
 	return c.modelRates[realmKey(realm)][model]
